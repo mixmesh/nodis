@@ -1,0 +1,8 @@
+{application, nodis,
+ [{description, "Node discovery on multicast network"},
+  {vsn, git},
+  {registered, [nodis_srv]},
+  {mod,{nodis_app,[]}},
+  {env, []},
+  {applications,[kernel,stdlib]}
+  ]}.

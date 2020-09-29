@@ -1,0 +1,4 @@
+# Add ipv6 address to interface
+INTERFACE=$1
+IPV6ADDR=$2
+sudo ifconfig $INTERFACE inet6 add $IPV6ADDR

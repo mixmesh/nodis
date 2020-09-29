@@ -1,0 +1,3 @@
+# Show info about ipv6 address
+IPV6ADDR=$1
+ipv6calc -q -i $IPV6ADDR

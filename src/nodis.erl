@@ -8,7 +8,9 @@
 -module(nodis).
 
 -export([start/0, stop/0]).
-
+-export([subscribe/0]).
+-export([unsubscribe/1]).
+-export([i/0]).
 
 start() ->
     application:start(nodis).
@@ -17,4 +19,10 @@ stop() ->
     application:stop(nodis).
 
 i() ->
-    noder_srv:i().
+    nodis_srv:i().
+
+subscribe() ->
+    nodis_srv:subscribe().
+
+unsubscribe(Ref) ->
+    nodis_srv:unsubscribe(Ref).

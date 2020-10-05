@@ -13,35 +13,46 @@
 -export([start_link/0, start_link/1]).
 -export([stop/0]).
 -export([send/1]).
+-export([subscribe/0]).
+-export([unsubscribe/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
+
 -export([reuse_port/0]).
 
 %% Test API
--export([dump/0]).
+-export([i/0]).
 
 -compile(export_all).
 
--define(dbg(F,A), io:format((F),(A))).
+%% -define(dbg(F,A), io:format((F),(A))).
+-define(dbg(F,A), ok).
 -define(err(F,A), io:format((F),(A))).
 -define(warn(F,A), io:format((F),(A))).
 
 -define(SERVER, ?MODULE).
 
+
+
+-type time_ms() :: non_neg_integer().
+-type tick()    :: integer().  %% monotonic tick
+
 %% subscriber for node events
 -record(sub,
 	{
-	 pid,
-	 mon
+	 ref :: reference(),
+	 pid :: pid()
 	}).
 
 -record(node,
 	{
-	 addr,
-	 last_seen
+	 addr :: inet:ip_address(),  %% ip address of node
+	 ival :: time_ms(),          %% node announce to send this often in ms
+	 first_seen :: tick(),       %% first time around
+	 last_seen :: tick()         %% we have not seen the node since
 	}).
 
 -type ifindex_t() :: non_neg_integer().
@@ -50,6 +61,16 @@
 	   string() => [ifindex_t()],
 	   ifindex_t() => [inet:ip_address()] }.
 
+-record(conf,
+	{
+	 hops :: non_neg_integer(), %% max number of hops (ttl)
+	 loop :: boolean(),  %% loop on host (other applications)
+	 magic :: binary(),  %% magic ping
+	 ping_delay :: time_ms(),
+	 ping_interval :: time_ms(),
+	 max_pings_lost :: non_neg_integer()
+	}).
+	
 -record(s, 
 	{
 	 in,          %% incoming udp socket
@@ -58,11 +79,10 @@
 	 ifaddr,      %% interface address
 	 mport,       %% port number used
 	 oport,       %% output port number used
-	 hops :: non_neg_integer(), %% max number of hops (ttl)
-	 loop :: boolean(),  %% loop on host (other applications)
-	 magic :: binary(),  %% magic ping
+	 conf :: #conf{},
+	 ping_tmr,    %% multicase ping each timeout
 	 node_list = [] :: [#node{}],
-	 sub_list = [] :: [#sub{}],
+	 subs = #{} :: #{ reference() => #sub{} },
 	 %% string or ip-address-tuple to index-list map
 	 addr_map = #{} :: addr_map_t()
 	}).
@@ -94,7 +114,11 @@
 -define(NODIS_MULTICAST_IF4,  ?ANY4).
 -define(NODIS_MULTICAST_IF6,  ?ANY6).
 
--type noder_option() ::
+-define(NODIS_DEFAULT_PING_DELAY, 1000). %% 1s before first ping
+-define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
+-define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
+
+-type nodis_option() ::
 	#{ name  =>  IfName::string(),
 	   magic =>  binary(),
 	   family => inet | inet6,          %% address family
@@ -104,7 +128,9 @@
 	   hops   => non_neg_integer(),
 	   loop   => boolean(),
 	   timeout => ReopenTimeout::integer(),
-	   status_interval => Time::timeout()
+	   ping_delay => Time::timeout(),
+	   ping_interval => Time::timeout(),
+	   max_pings_lost => non_neg_integer()
 	 }.
 
 %%====================================================================
@@ -119,14 +145,14 @@
 start_link() ->
     start_link(#{}).
 
--spec start_link(Opts::noder_option()) ->
+-spec start_link(Opts::nodis_option()) ->
 	  {ok,pid()} | {error,Reason::term()}.
 
 start_link(Opts) ->
     gen_server:start_link({local,?SERVER}, ?MODULE, [Opts], []).
     
--spec dump() -> ok | {error, Error::atom()}.
-dump() ->
+-spec i() -> ok | {error, Error::atom()}.
+i() ->
     call(dump).
 
 -spec stop() -> ok | {error, Error::atom()}.
@@ -135,6 +161,13 @@ stop() ->
 
 send(Data) ->
     call({send,Data}).
+
+subscribe() ->
+    call({subscribe,self()}).
+
+unsubscribe(Ref) ->
+    call({unsubscribe,Ref}).
+
 
 call(Request) -> 
     gen_server:call(?SERVER, Request).
@@ -160,8 +193,8 @@ select_mcast(inet6) -> ?NODIS_MULTICAST_ADDR6.
 %%                         {stop, Reason}
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
-init([Opts0]) ->
-    Opts = if is_map(Opts0)->Opts0; is_list(Opts0)->maps:from_list(Opts0) end,
+init([InputOpts]) ->
+    Opts = read_options(InputOpts),
     ?dbg("init opts = ~p\n", [Opts]),
     Family = maps:get(family, Opts, inet),
     Device = maps:get(device, Opts, undefined),
@@ -170,6 +203,10 @@ init([Opts0]) ->
     Mloop  = maps:get(loop, Opts, true),
     Laddr0 = maps:get(ifaddr, Opts, Device),
     Magic  = maps:get(magic, Opts, ?NODIS_MAGIC),
+    PingInterval = maps:get(ping_interval,Opts,?NODIS_DEFAULT_PING_INTERVAL),
+    PingDelay = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_PING_DELAY),
+    MaxPingsLost = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_MAX_PINGS_LOST),
+
     MPort = ?NODIS_UDP_PORT,
 
     AddrMap = make_addr_map(),
@@ -193,32 +230,36 @@ init([Opts0]) ->
 	multicast_if(Family,Laddr,AddrMap) ++
 	multicast_ttl(Family,Mhops) ++
 	multicast_loop(Family,Mloop),
-
-    io:format("Sendopt = ~p\n", [[Family,{active,false},
-				  {multicast_if,Laddr},
-				  {multicast_ttl,Mhops},
-				  {multicast_loop,Mloop}]]),
-				  
-    io:format("Sendopt = ~p\n", [SendOpts]),
-
+    ?dbg("Sendopt = ~p\n", [[Family,{active,false},
+			     {multicast_if,Laddr},
+			     {multicast_ttl,Mhops},
+			     {multicast_loop,Mloop}]]),
     case gen_udp:open(0, SendOpts) of
 	{ok,Out} ->
 	    {ok,OutPort} = inet:port(Out),
-	    io:format("output port = ~w\n", [OutPort]),
+	    ?dbg("output port = ~w\n", [OutPort]),
 	    RecvOpts = [Family,{reuseaddr,true},{mode,binary},{active,false}]
 		++ reuse_port() ++ add_membership(Family,MAddr,Laddr,AddrMap),
-	    io:format("RecvOpts = ~p\n", [RecvOpts]),
+	    ?dbg("RecvOpts = ~p\n", [RecvOpts]),
 	    case catch gen_udp:open(MPort,RecvOpts) of
 		{ok,In} ->
 		    inet:setopts(In, [{active, true}]),
+		    Conf = #conf {
+			      hops  = Mhops,
+			      loop  = Mloop,
+			      magic = Magic,
+			      ping_interval = PingInterval,
+			      ping_delay = PingDelay,
+			      max_pings_lost = MaxPingsLost
+			     },
+		    PingTmr = start_ping(PingDelay),
 		    {ok, #s{ in    = In,
 			     out   = Out, 
 			     maddr = MAddr,
 			     mport = MPort,
 			     oport = OutPort,
-			     hops  = Mhops,
-			     loop  = Mloop,
-			     magic = Magic,
+			     conf  = Conf,
+			     ping_tmr = PingTmr,
 			     addr_map = AddrMap
 			   }};
 		{error, _Reason} = Error ->
@@ -241,6 +282,19 @@ init([Opts0]) ->
 handle_call({send,Mesg}, _From, S) ->
     {Reply,S1} = send_message(Mesg,S),
     {reply, Reply, S1};
+handle_call({subscribe,Pid}, _From, S) ->
+    Mon = erlang:monitor(process, Pid),
+    Sub = #sub { ref=Mon, pid=Pid },
+    Subs = (S#s.subs)#{ Mon => Sub },
+    {reply, {ok,Mon}, S#s { subs = Subs }};
+handle_call({unsubscribe,Ref}, _From, S) ->
+    case maps:take(Ref, S#s.subs) of
+	error ->
+	    {reply,ok,S};
+	{Sub,Subs} ->
+	    erlang:demonitor(Sub#sub.ref, [flush]),
+	    {reply,ok,S#s { subs=Subs }}
+    end;
 handle_call(dump, _From, S) ->
     dump_state(S),
     {reply, ok, S};
@@ -259,7 +313,7 @@ handle_cast({send,Mesg}, S) ->
     {_, S1} = send_message(Mesg, S),
     {noreply, S1};
 handle_cast(_Mesg, S) ->
-    ?dbg("noder: handle_cast: ~p\n", [_Mesg]),
+    ?dbg("nodis: handle_cast: ~p\n", [_Mesg]),
     {noreply, S}.
 
 
@@ -271,21 +325,36 @@ handle_cast(_Mesg, S) ->
 %%--------------------------------------------------------------------
 handle_info({udp,U,Addr,Port,Data}, S) when S#s.in == U ->
     IsLocalAddress = maps:get(Addr, S#s.addr_map, []) =/= [],
-    ?dbg("noder: udp ~s:~w (~s) ~p\n", 
+    ?dbg("nodis: udp ~s:~w (~s) ~p\n", 
 	 [inet:ntoa(Addr),Port, if IsLocalAddress -> "local";
 				   true -> "remote" end, Data]),
     if IsLocalAddress, Port =:= S#s.oport -> %% this is our output! (loop=true)
-	    ?dbg("noder: discard ~s:~w ~p\n",  [inet:ntoa(Addr),Port,Data]),
+	    %%?dbg("nodis: discard ~s:~w ~p\n",  [inet:ntoa(Addr),Port,Data]),
 	    {noreply, S};
        true ->
-	    %% if Data == MAGIC then add Addr to the list of  node
-	    if Data =:= ?NODIS_MAGIC ->
-		    handle_node(Addr, S);
-	       true ->
+	    case Data of
+		<<MLen:32, Magic:MLen/binary, IVal:32, _Garbage/binary>> when
+		      Magic =:= (S#s.conf)#conf.magic ->
+		    handle_node(Addr,IVal,S);
+		_ ->
 		    ?dbg("ignored data from ~s:~w = ~p\n",
 			 [inet:ntoa(Addr),Port,Data]),
 		    {noreply, S}
 	    end
+    end;
+handle_info({timeout,Tmr,ping}, S) when Tmr =:= S#s.ping_tmr ->
+    send_ping(S),
+    PingTmr = start_ping((S#s.conf)#conf.ping_interval),
+    S1 = gc_nodes(S),
+    {noreply, S1#s { ping_tmr = PingTmr }};
+handle_info({'DOWN',Ref,process,_Pid,_Reason}, S) ->
+    case maps:take(Ref, S#s.subs) of
+	error ->
+	    {noreply,S};
+	{_S,Subs} ->
+	    ?dbg("subscription from pid ~p deleted reason=~p",
+		 [_Pid, _Reason]),
+	    {noreply,S#s { subs=Subs }}
     end;
 handle_info(_Info, S) ->
     {noreply, S}.
@@ -311,29 +380,82 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%--------------------------------------------------------------------
 
-handle_node(Addr, S) ->
+%% input options override environment options
+read_options(InputOpts) ->
+    Env = maps:from_list(application:get_all_env(nodis)),
+    if is_map(InputOpts) ->
+	    maps:merge(Env, InputOpts);
+       is_list(InputOpts) ->
+	    maps:merge(Env, maps:from_list(InputOpts))
+    end.
+
+start_ping(Delay) when is_integer(Delay), Delay > 0 ->
+    erlang:start_timer(Delay, self(), ping).
+
+handle_node(Addr,IVal,S) ->
     NodeList0 = S#s.node_list,
     case lists:keytake(Addr, #node.addr, NodeList0) of
 	false ->
 	    Time = erlang:monotonic_time(),
-	    Node = #node { addr = Addr, last_seen = Time },
+	    Node = #node { addr = Addr, ival = IVal,
+			   first_seen = Time, last_seen = Time },
+	    notify_subs(S, {up, Addr}),
 	    {noreply, S#s { node_list = [Node | NodeList0] }};
 	{value, Node0, NodeList} ->
 	    Time = erlang:monotonic_time(),
-	    Node = Node0#node { addr = Addr, last_seen = Time },
+	    Node = Node0#node { addr = Addr, ival = IVal, last_seen = Time },
 	    {noreply, S#s { node_list = [Node | NodeList ]}}
     end.
 
+gc_nodes(S) ->
+    Time = erlang:monotonic_time(),
+    MaxPingsLost = (S#s.conf)#conf.max_pings_lost,
+    Ns = gc_nodes_(S#s.node_list, Time, MaxPingsLost, S),
+    S#s{ node_list = Ns }.
+
+gc_nodes_([N|Ns], Now, MaxPingsLost, S) ->
+    LTime = erlang:convert_time_unit(Now-N#node.last_seen,native,microsecond),
+    if LTime > N#node.ival*MaxPingsLost*1000 ->
+	    notify_subs(S, {down, N#node.addr}),
+	    gc_nodes_(Ns, Now, MaxPingsLost, S);
+       LTime > N#node.ival*1000 ->
+	    notify_subs(S, {missed, N#node.addr}),
+	    [N | gc_nodes_(Ns, Now, MaxPingsLost, S)];
+       true ->
+	    [N | gc_nodes_(Ns, Now, MaxPingsLost,S)]
+    end;
+gc_nodes_([], _Now, _MaxPingsLost, _S) ->
+    [].
+
+notify_subs(S, Message) ->
+    maps:fold(
+      fun(_Ref,Sub,_Acc) ->
+	      Sub#sub.pid ! {nodis, Sub#sub.ref, Message}
+      end, ok, S#s.subs).
+
 dump_state(S) ->
     Time = erlang:monotonic_time(),
-    dump_nodes(S#s.node_list, 1, Time).
+    MaxPingsLost = (S#s.conf)#conf.max_pings_lost,
+    dump_nodes(S#s.node_list, 1, Time, MaxPingsLost).
 
-dump_nodes([N|Ns], I, Now) ->
-    UpTime = erlang:convert_time_unit(Now-N#node.last_seen,native,microsecond),
-    io:format("~w: ~s uptime: ~.2fs\n", 
-	      [I, inet:ntoa(N#node.addr),UpTime/1000000]),
-    dump_nodes(Ns,I+1,Now);
-dump_nodes([], _I, _Now) ->
+dump_nodes([N|Ns], I, Now, MaxPingsLost) ->
+    UTime = erlang:convert_time_unit(Now-N#node.first_seen,native,microsecond),
+    LTime = erlang:convert_time_unit(Now-N#node.last_seen,native,microsecond),
+    Status = if LTime > N#node.ival*MaxPingsLost*1000 ->
+		     dead;
+		LTime > N#node.ival*1000 ->
+		     missed;
+		true ->
+		     ok
+	     end,
+    io:format("~w: ~s uptime: ~.2fs last: ~.2fs ival=~w status=~s\n", 
+	      [I, inet:ntoa(N#node.addr),
+	       UTime/1000000,
+	       LTime/1000000,
+	       N#node.ival,
+	       Status]),
+    dump_nodes(Ns,I+1,Now,MaxPingsLost);
+dump_nodes([], _I, _Now, _MaxPingsLost) ->
     ok.
 
 %% socket options
@@ -496,12 +618,19 @@ filter_family(_IP, _) -> false.
 %% filter_ip({A,_,_,_,_,_,_,_}) -> (A band 16#FE80 =/= 16#FE80);
 filter_ip(_) -> true.
 
+send_ping(S) ->
+    %% multicast magic + ping_interval
+    Magic = (S#s.conf)#conf.magic,
+    IVal  = (S#s.conf)#conf.ping_interval,
+    Ping  = <<(byte_size(Magic)):32, Magic/binary,  IVal:32>>,
+    send_message(Ping, S).
+
+
 send_message(Data, S) ->
-    ?dbg("gen_udp: send ~s:~w message ~p\n", [inet:ntoa(S#s.maddr),S#s.mport,
-					      Data]),
+    %% ?dbg("gen_udp: send ~s:~w message ~p\n", [inet:ntoa(S#s.maddr),S#s.mport,Data]),
     case gen_udp:send(S#s.out, S#s.maddr, S#s.mport, Data) of
 	ok ->
-	    ?dbg("gen_udp: send message ~p\n", [Data]),
+	    %% ?dbg("gen_udp: send message ~p\n", [Data]),
 	    {ok,S};
 	_Error ->
 	    ?dbg("gen_udp: failure=~p\n", [_Error]),

@@ -119,10 +119,9 @@
 -define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
 
 -type nodis_option() ::
-	#{ name  =>  IfName::string(),
-	   magic =>  binary(),
+	#{ magic =>  binary(),
 	   family => inet | inet6,          %% address family
-	   device => undefined | string(),  %% network device used
+	   device => undefined | string(),  %% interface name
 	   maddr =>  inet:ip_address(),
 	   ifaddr => inet:ip_address(),
 	   hops   => non_neg_integer(),

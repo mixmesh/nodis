@@ -11,10 +11,15 @@
 
 %% API
 -export([start_link/0, start_link/1]).
--export([stop/0]).
--export([send/1]).
--export([subscribe/0]).
--export([unsubscribe/1]).
+-export([stop/0, stop/1]).
+-export([subscribe/0, unsubscribe/1]).
+-export([subscribe/1, unsubscribe/2]).
+
+%% test
+-export([send/1, send/2]).
+%% simulation
+-export([start_link_sim/0]).
+-export([simping/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -34,8 +39,6 @@
 -define(warn(F,A), io:format((F),(A))).
 
 -define(SERVER, ?MODULE).
-
-
 
 -type time_ms() :: non_neg_integer().
 -type tick()    :: integer().  %% monotonic tick
@@ -63,6 +66,7 @@
 
 -record(conf,
 	{
+	 simulation = false :: boolean(),
 	 hops :: non_neg_integer(), %% max number of hops (ttl)
 	 loop :: boolean(),  %% loop on host (other applications)
 	 magic :: binary(),  %% magic ping
@@ -119,7 +123,8 @@
 -define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
 
 -type nodis_option() ::
-	#{ magic =>  binary(),
+	#{ simulation => boolean(),
+	   magic =>  binary(),
 	   family => inet | inet6,          %% address family
 	   device => undefined | string(),  %% interface name
 	   maddr =>  inet:ip_address(),
@@ -149,27 +154,60 @@ start_link() ->
 
 start_link(Opts) ->
     gen_server:start_link({local,?SERVER}, ?MODULE, [Opts], []).
+
+-spec start_link_sim() ->
+	  {ok,pid()} | {error,Reason::term()}.
+
+start_link_sim() ->
+    gen_server:start_link(?MODULE, [[{simulation,true}]], []).
     
 -spec i() -> ok | {error, Error::atom()}.
 i() ->
-    call(dump).
+    i(?SERVER).
+-spec i(Pid::pid()|atom()) -> ok | {error, Error::atom()}.
+i(Pid) ->
+    gen_server:call(Pid, dump).
+
 
 -spec stop() -> ok | {error, Error::atom()}.
 stop() ->
-    call(stop).
+    stop(?SERVER).
 
-send(Data) ->
-    call({send,Data}).
+-spec stop(Pid::pid()) -> ok | {error, Error::atom()}.
 
+stop(Pid) ->
+    gen_server:call(Pid,stop).
+
+-spec subscribe() -> {ok,reference()} | {error, Error::atom()}.
 subscribe() ->
-    call({subscribe,self()}).
+    subscribe(?SERVER).
+-spec subscribe(Pid::pid()) -> {ok,reference()} | {error, Error::atom()}.
+subscribe(Pid) ->
+    gen_server:call(Pid, {subscribe,self()}).
 
-unsubscribe(Ref) ->
-    call({unsubscribe,Ref}).
+-spec unsubscribe(Ref::reference()) -> ok | {error, Error::atom()}.
+unsubscribe(Ref) -> 
+    unsubscribe(?SERVER,Ref).
+-spec unsubscribe(Pid::pid(),Ref::reference()) -> ok | {error, Error::atom()}.
+unsubscribe(Pid,Ref) ->
+    gen_server:call(Pid, {unsubscribe,Ref}).
 
+%% test - broadcast any message
+send(Data) ->
+    send(?SERVER, Data).
+send(Pid, Data) ->
+    gen_server:call(Pid,{send,Data}).
 
-call(Request) -> 
-    gen_server:call(?SERVER, Request).
+%% simulation feed nodis_srv with simulated ping data
+%% will show up with the player subscriver as
+%% {up, {A,B,C,D,Port}}
+%% {missed, {A,B,C,D,Port}}
+%% {down, {A,B,C,D,Port}}
+simping(Pid, {A,B,C,D}, Port, IVal) when
+      (A bor B bor C bor D) band (bnot 16#ff) =:= 0, %% = 4 bytes!
+      is_integer(Port),
+      is_integer(IVal) ->
+    gen_server:cast(Pid, {simping,{A,B,C,D,Port},IVal}).
 
 %% util
 select_any(inet) -> ?ANY4;
@@ -205,67 +243,77 @@ init([InputOpts]) ->
     PingInterval = maps:get(ping_interval,Opts,?NODIS_DEFAULT_PING_INTERVAL),
     PingDelay = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_PING_DELAY),
     MaxPingsLost = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_MAX_PINGS_LOST),
-
-    MPort = ?NODIS_UDP_PORT,
-
-    AddrMap = make_addr_map(),
-    Laddr = if is_tuple(Laddr0) ->
-		    Laddr0;
-	       is_list(Laddr0) ->
-		    case lookup_ip(Laddr0, Family, AddrMap) of
-			[] ->
-			    ?warn("No such interface ~p",[Laddr0]),
+    Simulation = maps:get(simulation, Opts, false),
+    Conf = #conf {
+	      simulation = Simulation,
+	      hops  = Mhops,
+	      loop  = Mloop,
+	      magic = Magic,
+	      ping_interval = PingInterval,
+	      ping_delay = PingDelay,
+	      max_pings_lost = MaxPingsLost
+	     },
+    case Simulation of
+	true ->
+	    PingTmr = start_ping(PingDelay),
+	    {ok, #s{ 
+		     conf  = Conf,
+		     ping_tmr = PingTmr
+		   }};
+	false ->
+	    MPort = ?NODIS_UDP_PORT,
+	    AddrMap = make_addr_map(),
+	    Laddr = if is_tuple(Laddr0) ->
+			    Laddr0;
+		       is_list(Laddr0) ->
+			    case lookup_ip(Laddr0, Family, AddrMap) of
+				[] ->
+				    ?warn("No such interface ~p",[Laddr0]),
+				    select_any(Family);
+				[IP|_] -> IP
+			    end;
+		       Laddr0 =:= any; Laddr0 =:= undefined -> 
 			    select_any(Family);
-			[IP|_] -> IP
+		       true ->
+			    ?warn("No such interface ~p",[Laddr0]),
+			    select_any(Family)
+		    end,
+	    SendOpts = [Family,{active,false}] ++
+		multicast_if(Family,Laddr,AddrMap) ++
+		multicast_ttl(Family,Mhops) ++
+		multicast_loop(Family,Mloop),
+	    ?dbg("Sendopt = ~p\n", [[Family,{active,false},
+				     {multicast_if,Laddr},
+				     {multicast_ttl,Mhops},
+				     {multicast_loop,Mloop}]]),
+	    case gen_udp:open(0, SendOpts) of
+		{ok,Out} ->
+		    {ok,OutPort} = inet:port(Out),
+		    ?dbg("output port = ~w\n", [OutPort]),
+		    RecvOpts = [Family,{reuseaddr,true},
+				{mode,binary},{active,false}] ++
+			reuse_port() ++
+			add_membership(Family,MAddr,Laddr,AddrMap),
+		    ?dbg("RecvOpts = ~p\n", [RecvOpts]),
+		    case catch gen_udp:open(MPort,RecvOpts) of
+			{ok,In} ->
+			    inet:setopts(In, [{active, true}]),
+			    PingTmr = start_ping(PingDelay),
+			    {ok, #s{ in    = In,
+				     out   = Out, 
+				     maddr = MAddr,
+				     mport = MPort,
+				     oport = OutPort,
+				     conf  = Conf,
+				     ping_tmr = PingTmr,
+				     addr_map = AddrMap
+				   }};
+			{error, _Reason} = Error ->
+			    {stop, Error}
 		    end;
-	       Laddr0 =:= any; Laddr0 =:= undefined -> 
-		    select_any(Family);
-	       true ->
-		    ?warn("No such interface ~p",[Laddr0]),
-		    select_any(Family)
-	    end,
-
-    SendOpts = [Family,{active,false}] ++
-	multicast_if(Family,Laddr,AddrMap) ++
-	multicast_ttl(Family,Mhops) ++
-	multicast_loop(Family,Mloop),
-    ?dbg("Sendopt = ~p\n", [[Family,{active,false},
-			     {multicast_if,Laddr},
-			     {multicast_ttl,Mhops},
-			     {multicast_loop,Mloop}]]),
-    case gen_udp:open(0, SendOpts) of
-	{ok,Out} ->
-	    {ok,OutPort} = inet:port(Out),
-	    ?dbg("output port = ~w\n", [OutPort]),
-	    RecvOpts = [Family,{reuseaddr,true},{mode,binary},{active,false}]
-		++ reuse_port() ++ add_membership(Family,MAddr,Laddr,AddrMap),
-	    ?dbg("RecvOpts = ~p\n", [RecvOpts]),
-	    case catch gen_udp:open(MPort,RecvOpts) of
-		{ok,In} ->
-		    inet:setopts(In, [{active, true}]),
-		    Conf = #conf {
-			      hops  = Mhops,
-			      loop  = Mloop,
-			      magic = Magic,
-			      ping_interval = PingInterval,
-			      ping_delay = PingDelay,
-			      max_pings_lost = MaxPingsLost
-			     },
-		    PingTmr = start_ping(PingDelay),
-		    {ok, #s{ in    = In,
-			     out   = Out, 
-			     maddr = MAddr,
-			     mport = MPort,
-			     oport = OutPort,
-			     conf  = Conf,
-			     ping_tmr = PingTmr,
-			     addr_map = AddrMap
-			   }};
-		{error, _Reason} = Error ->
+		Error ->
 		    {stop, Error}
-	    end;
-	Error ->
-	    {stop, Error}
+	    end
     end.
 
     
@@ -278,9 +326,7 @@ init([InputOpts]) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
-handle_call({send,Mesg}, _From, S) ->
-    {Reply,S1} = send_message(Mesg,S),
-    {reply, Reply, S1};
+
 handle_call({subscribe,Pid}, _From, S) ->
     Mon = erlang:monitor(process, Pid),
     Sub = #sub { ref=Mon, pid=Pid },
@@ -297,6 +343,9 @@ handle_call({unsubscribe,Ref}, _From, S) ->
 handle_call(dump, _From, S) ->
     dump_state(S),
     {reply, ok, S};
+handle_call({send,Mesg}, _From, S) ->
+    {Reply,S1} = send_message(Mesg,S),
+    {reply, Reply, S1};
 handle_call(stop, _From, S) ->
     {stop, normal, ok, S};
 handle_call(_Request, _From, S) ->
@@ -311,10 +360,11 @@ handle_call(_Request, _From, S) ->
 handle_cast({send,Mesg}, S) ->
     {_, S1} = send_message(Mesg, S),
     {noreply, S1};
+handle_cast({simping,Addr,IVal}, S) ->
+    handle_node(Addr,IVal,S);
 handle_cast(_Mesg, S) ->
     ?dbg("nodis: handle_cast: ~p\n", [_Mesg]),
     {noreply, S}.
-
 
 %%--------------------------------------------------------------------
 %% Function: handle_info(Info, State) -> {noreply, State} |
@@ -447,8 +497,15 @@ dump_nodes([N|Ns], I, Now, MaxPingsLost) ->
 		true ->
 		     ok
 	     end,
+    AddrString =
+	case N#node.addr of
+	    {A,B,C,D,Port} -> %% from simulation
+		inet:ntoa({A,B,C,D}) ++ ":" ++ integer_to_list(Port);
+	    Addr ->
+		inet:ntoa(Addr)
+	end,
     io:format("~w: ~s uptime: ~.2fs last: ~.2fs ival=~w status=~s\n", 
-	      [I, inet:ntoa(N#node.addr),
+	      [I, AddrString,
 	       UTime/1000000,
 	       LTime/1000000,
 	       N#node.ival,
@@ -618,12 +675,16 @@ filter_family(_IP, _) -> false.
 filter_ip(_) -> true.
 
 send_ping(S) ->
-    %% multicast magic + ping_interval
-    Magic = (S#s.conf)#conf.magic,
-    IVal  = (S#s.conf)#conf.ping_interval,
-    Ping  = <<(byte_size(Magic)):32, Magic/binary,  IVal:32>>,
-    send_message(Ping, S).
-
+    Conf = S#s.conf,
+    if Conf#conf.simulation -> 
+	    {ok,S};
+       true ->
+	    %% multicast magic + ping_interval
+	    Magic = Conf#conf.magic,
+	    IVal  = Conf#conf.ping_interval,
+	    Ping  = <<(byte_size(Magic)):32, Magic/binary,  IVal:32>>,
+	    send_message(Ping, S)
+    end.
 
 send_message(Data, S) ->
     %% ?dbg("gen_udp: send ~s:~w message ~p\n", [inet:ntoa(S#s.maddr),S#s.mport,Data]),

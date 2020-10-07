@@ -1,8 +1,7 @@
 #@BEGIN-APP-DEFAULT-RULES@
 APP=$(shell basename `cd ..; pwd`)
-DEPSDIR=.deps
 ERLC=$(shell which erlc)
-ERLC_FLAGS=-MMD -MF $(DEPSDIR)/$<.d -I ../.. +debug_info -Ddebug
+ERLC_FLAGS=-MMD -MF .$<.d -I ../.. +debug_info -Ddebug
 ERL_SOURCES=$(wildcard *.erl)
 ERL_OBJECTS=$(ERL_SOURCES:%.erl=../ebin/%.beam)
 ALL_OBJECTS=$(ERL_OBJECTS)
@@ -15,14 +14,7 @@ VERSION=$(shell git describe --always --tags)
 APP_SRC=$(APP).app.src
 APP_TARGET=../ebin/$(APP).app
 
-.PHONY: directories
-
-all: directories $(APP_TARGET) $(ALL_OBJECTS)
-
-directories:	$(DEPSDIR)
-
-$(DEPSDIR):
-	mkdir -p $(DEPSDIR)
+all: $(APP_TARGET) $(ALL_OBJECTS)
 
 clean:
 	rm -f $(ALL_OBJECTS) *.core $(DEPSDIR)/*.d
@@ -34,5 +26,5 @@ $(APP_TARGET): $(APP_SRC)
 	sed -e 's;%VSN%;$(VERSION);' -e 's;%MODULES%;$(MODULES);' $(APP_SRC) > $(APP_TARGET)
 
 
--include $(DEPSDIR)/*.d
+-include .*.d
 #@END-APP-DEFAULT-RULES@

@@ -50,9 +50,11 @@
 	 pid :: pid()
 	}).
 
+-type sim_address() :: {byte(), byte(), byte(), byte(), inet:port_number()}.
+
 -record(node,
 	{
-	 addr :: inet:ip_address(),  %% ip address of node
+	 addr :: inet:ip_address() | sim_address(),  %% ip address of node
 	 ival :: time_ms(),          %% node announce to send this often in ms
 	 first_seen :: tick(),       %% first time around
 	 last_seen :: tick()         %% we have not seen the node since
@@ -163,15 +165,15 @@ start_link_sim() ->
     
 -spec i() -> ok | {error, Error::atom()}.
 i() ->
-    i(?SERVER).
--spec i(Pid::pid()|atom()) -> ok | {error, Error::atom()}.
+    gen_server:call(?SERVER, dump).
+
+-spec i(Pid::pid()) -> ok | {error, Error::atom()}.
 i(Pid) ->
     gen_server:call(Pid, dump).
 
-
 -spec stop() -> ok | {error, Error::atom()}.
 stop() ->
-    stop(?SERVER).
+    gen_server:call(?SERVER,stop).
 
 -spec stop(Pid::pid()) -> ok | {error, Error::atom()}.
 
@@ -180,14 +182,16 @@ stop(Pid) ->
 
 -spec subscribe() -> {ok,reference()} | {error, Error::atom()}.
 subscribe() ->
-    subscribe(?SERVER).
+    gen_server:call(?SERVER, {subscribe,self()}).
+
 -spec subscribe(Pid::pid()) -> {ok,reference()} | {error, Error::atom()}.
 subscribe(Pid) ->
     gen_server:call(Pid, {subscribe,self()}).
 
 -spec unsubscribe(Ref::reference()) -> ok | {error, Error::atom()}.
 unsubscribe(Ref) -> 
-    unsubscribe(?SERVER,Ref).
+    gen_server:call(?SERVER, {unsubscribe,Ref}).
+
 -spec unsubscribe(Pid::pid(),Ref::reference()) -> ok | {error, Error::atom()}.
 unsubscribe(Pid,Ref) ->
     gen_server:call(Pid, {unsubscribe,Ref}).

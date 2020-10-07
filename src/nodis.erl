@@ -8,6 +8,7 @@
 -module(nodis).
 
 -export([start/0, stop/0]).
+-export([config_change/3]).
 -export([subscribe/0, unsubscribe/1]).
 -export([subscribe/1, unsubscribe/2]).
 -export([i/0, i/1]).
@@ -35,3 +36,7 @@ unsubscribe(Ref) ->
 
 unsubscribe(Pid,Ref) ->
     nodis_srv:unsubscribe(Pid,Ref).
+
+config_change(_Changed,_New,_Removed) ->
+    ok.
+    

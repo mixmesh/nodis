@@ -18,7 +18,7 @@
 %% test
 -export([send/1, send/2]).
 %% simulation
--export([start_link_sim/0]).
+-export([start_link_sim/0, start_link_sim/1]).
 -export([simping/4]).
 
 %% gen_server callbacks
@@ -76,8 +76,8 @@
 	 ping_interval :: time_ms(),
 	 max_pings_lost :: non_neg_integer()
 	}).
-	
--record(s, 
+
+-record(s,
 	{
 	 in,          %% incoming udp socket
 	 out,         %% outgoing udp socket
@@ -162,7 +162,13 @@ start_link(Opts) ->
 
 start_link_sim() ->
     gen_server:start_link(?MODULE, [[{simulation,true}]], []).
-    
+
+-spec start_link_sim(Opts::nodis_option()) ->
+	  {ok,pid()} | {error,Reason::term()}.
+
+start_link_sim(Opts) ->
+    gen_server:start_link(?MODULE, [Opts#{simulation => true}], []).
+
 -spec i() -> ok | {error, Error::atom()}.
 i() ->
     gen_server:call(?SERVER, dump).
@@ -189,7 +195,7 @@ subscribe(Pid) ->
     gen_server:call(Pid, {subscribe,self()}).
 
 -spec unsubscribe(Ref::reference()) -> ok | {error, Error::atom()}.
-unsubscribe(Ref) -> 
+unsubscribe(Ref) ->
     gen_server:call(?SERVER, {unsubscribe,Ref}).
 
 -spec unsubscribe(Pid::pid(),Ref::reference()) -> ok | {error, Error::atom()}.
@@ -260,7 +266,7 @@ init([InputOpts]) ->
     case Simulation of
 	true ->
 	    PingTmr = start_ping(PingDelay),
-	    {ok, #s{ 
+	    {ok, #s{
 		     conf  = Conf,
 		     ping_tmr = PingTmr
 		   }};
@@ -276,7 +282,7 @@ init([InputOpts]) ->
 				    select_any(Family);
 				[IP|_] -> IP
 			    end;
-		       Laddr0 =:= any; Laddr0 =:= undefined -> 
+		       Laddr0 =:= any; Laddr0 =:= undefined ->
 			    select_any(Family);
 		       true ->
 			    ?warn("No such interface ~p",[Laddr0]),
@@ -304,7 +310,7 @@ init([InputOpts]) ->
 			    inet:setopts(In, [{active, true}]),
 			    PingTmr = start_ping(PingDelay),
 			    {ok, #s{ in    = In,
-				     out   = Out, 
+				     out   = Out,
 				     maddr = MAddr,
 				     mport = MPort,
 				     oport = OutPort,
@@ -320,7 +326,7 @@ init([InputOpts]) ->
 	    end
     end.
 
-    
+
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
 %%                                      {reply, Reply, State, Timeout} |
@@ -378,7 +384,7 @@ handle_cast(_Mesg, S) ->
 %%--------------------------------------------------------------------
 handle_info({udp,U,Addr,Port,Data}, S) when S#s.in == U ->
     IsLocalAddress = maps:get(Addr, S#s.addr_map, []) =/= [],
-    ?dbg("nodis: udp ~s:~w (~s) ~p\n", 
+    ?dbg("nodis: udp ~s:~w (~s) ~p\n",
 	 [inet:ntoa(Addr),Port, if IsLocalAddress -> "local";
 				   true -> "remote" end, Data]),
     if IsLocalAddress, Port =:= S#s.oport -> %% this is our output! (loop=true)
@@ -508,7 +514,7 @@ dump_nodes([N|Ns], I, Now, MaxPingsLost) ->
 	    Addr ->
 		inet:ntoa(Addr)
 	end,
-    io:format("~w: ~s uptime: ~.2fs last: ~.2fs ival=~w status=~s\n", 
+    io:format("~w: ~s uptime: ~.2fs last: ~.2fs ival=~w status=~s\n",
 	      [I, AddrString,
 	       UTime/1000000,
 	       LTime/1000000,
@@ -540,7 +546,7 @@ multicast_if(inet6, Laddr, AddrMap) ->
 	    if Multi =/= [] ->
 		    ?warn("address ~s exist on multiple interfaces ~w\n",
 			  [inet:ntoa(Laddr), IfIndexList]);
-	       true -> 
+	       true ->
 		    ok
 	    end,
 	    [{raw,?IPPROTO_IPV6,?IPV6_MULTICAST_IF,<<IfIndex:32/native>>}];
@@ -569,7 +575,7 @@ multicast_loop(inet6, Loop) ->
 %%	/* local IPv6 address of interface */
 %%	int		ipv6mr_ifindex;
 %% };
-add_membership(inet,MAddr,LAddr,_AddrMap) -> 
+add_membership(inet,MAddr,LAddr,_AddrMap) ->
     [{add_membership,{MAddr,LAddr}}];
 add_membership(inet6,MAddr,?ANY6,_AddrMap) ->
     Addr = ip_to_binary(MAddr),
@@ -582,7 +588,7 @@ add_membership(inet6,MAddr,LAddr,AddrMap) ->
 	    if Multi =/= [] ->
 		    ?warn("address ~s exist on multiple interfaces ~w\n",
 			  [inet:ntoa(LAddr), IfIndexList]);
-	       true -> 
+	       true ->
 		    ok
 	    end,
 	    Addr = ip_to_binary(MAddr),
@@ -635,9 +641,9 @@ make_addr_map_([], _IndexMap, Map) ->
     Map;
 make_addr_map_([{IfName,Flags}|List], IndexMap, M0) ->
     Index = maps:get(IfName, IndexMap),
-    AddrList = lists:filter(fun filter_ip/1, 
+    AddrList = lists:filter(fun filter_ip/1,
 			    proplists:get_all_values(addr, Flags)),
-    M1 = 
+    M1 =
 	lists:foldl(
 	  fun(IP, Mi) ->
 		  IndexList =
@@ -664,7 +670,7 @@ make_index_map() ->
       [case binary:split(IfBin, <<": ">>, [global]) of
 	   [IndexBin,NameBin | _] ->
 	       {binary_to_list(NameBin),erlang:binary_to_integer(IndexBin)}
-       end || IfBin <- IfList]).    
+       end || IfBin <- IfList]).
 
 filter_family_list(IPList, Family) ->
     lists:filter(fun(IP) -> filter_family(IP, Family) end, IPList).
@@ -680,7 +686,7 @@ filter_ip(_) -> true.
 
 send_ping(S) ->
     Conf = S#s.conf,
-    if Conf#conf.simulation -> 
+    if Conf#conf.simulation ->
 	    {ok,S};
        true ->
 	    %% multicast magic + ping_interval

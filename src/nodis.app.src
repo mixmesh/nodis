@@ -1,3 +1,4 @@
+%% -*- erlang -*-
 {application, nodis,
  [{description, "Node discovery on multicast network"},
   {vsn, "%VSN%"},

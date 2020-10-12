@@ -10,7 +10,8 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, start_link/1]).
+-export([start_link_local/0, start_link_local/1]).
+-export([start_link/1]).
 -export([stop/0, stop/1]).
 -export([subscribe/0, unsubscribe/1]).
 -export([subscribe/1, unsubscribe/2]).
@@ -18,7 +19,6 @@
 %% test
 -export([send/1, send/2]).
 %% simulation
--export([start_link_sim/0, start_link_sim/1]).
 -export([simping/4]).
 
 %% gen_server callbacks
@@ -147,27 +147,21 @@
 %% Description: Starts the server
 %%--------------------------------------------------------------------
 
--spec start_link() -> {ok,pid()} | {error,Reason::term()}.
-start_link() ->
-    start_link(#{}).
+-spec start_link_local() -> {ok,pid()} | {error,Reason::term()}.
+start_link_local() ->
+    start_link_local(#{}).
+
+-spec start_link_local(Opts::nodis_option()) ->
+	  {ok,pid()} | {error,Reason::term()}.
+
+start_link_local(Opts) ->
+    gen_server:start_link({local,?SERVER}, ?MODULE, [Opts], []).
 
 -spec start_link(Opts::nodis_option()) ->
 	  {ok,pid()} | {error,Reason::term()}.
 
 start_link(Opts) ->
-    gen_server:start_link({local,?SERVER}, ?MODULE, [Opts], []).
-
--spec start_link_sim() ->
-	  {ok,pid()} | {error,Reason::term()}.
-
-start_link_sim() ->
-    gen_server:start_link(?MODULE, [[{simulation,true}]], []).
-
--spec start_link_sim(Opts::nodis_option()) ->
-	  {ok,pid()} | {error,Reason::term()}.
-
-start_link_sim(Opts) ->
-    gen_server:start_link(?MODULE, [Opts#{simulation => true}], []).
+    gen_server:start_link(?MODULE, [Opts], []).
 
 -spec i() -> ok | {error, Error::atom()}.
 i() ->

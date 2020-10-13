@@ -57,7 +57,8 @@
 	 addr :: inet:ip_address() | sim_address(),  %% ip address of node
 	 ival :: time_ms(),          %% node announce to send this often in ms
 	 first_seen :: tick(),       %% first time around
-	 last_seen :: tick()         %% we have not seen the node since
+	 last_seen :: tick(),        %% we have not seen the node since
+	 last_up :: tick()           %& since we sent up message
 	}).
 
 -type ifindex_t() :: non_neg_integer().
@@ -69,12 +70,13 @@
 -record(conf,
 	{
 	 simulation = false :: boolean(),
-	 hops :: non_neg_integer(), %% max number of hops (ttl)
-	 loop :: boolean(),  %% loop on host (other applications)
-	 magic :: binary(),  %% magic ping
-	 ping_delay :: time_ms(),
-	 ping_interval :: time_ms(),
-	 max_pings_lost :: non_neg_integer()
+	 hops :: non_neg_integer(),   %% max number of hops (ttl)
+	 loop :: boolean(),           %% loop on host (other applications)
+	 magic :: binary(),           %% magic ping
+	 ping_delay :: time_ms(),     %% start delay til first ping
+	 ping_interval :: time_ms(),  %% then send with this interval
+	 refresh_interval :: time_ms(),  %% refresh send up to subscribers
+	 max_pings_lost :: non_neg_integer()  %% down if we missed pings
 	}).
 
 -record(s,
@@ -123,6 +125,8 @@
 -define(NODIS_DEFAULT_PING_DELAY, 1000). %% 1s before first ping
 -define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
 -define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
+%% -define(NODIS_DEFAULT_REFRESH_INTERVAL, (5*60*1000)). %% 5min
+-define(NODIS_DEFAULT_REFRESH_INTERVAL, 30000). %% test
 
 -type nodis_option() ::
 	#{ simulation => boolean(),
@@ -134,8 +138,9 @@
 	   hops   => non_neg_integer(),
 	   loop   => boolean(),
 	   timeout => ReopenTimeout::integer(),
-	   ping_delay => Time::timeout(),
-	   ping_interval => Time::timeout(),
+	   ping_delay => time_ms(),
+	   ping_interval => time_ms(),
+	   refresh_interval => time_ms(),
 	   max_pings_lost => non_neg_integer()
 	 }.
 
@@ -247,6 +252,7 @@ init([InputOpts]) ->
     PingInterval = maps:get(ping_interval,Opts,?NODIS_DEFAULT_PING_INTERVAL),
     PingDelay = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_PING_DELAY),
     MaxPingsLost = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_MAX_PINGS_LOST),
+    RefreshInterval = maps:get(refresh_interval,Opts,?NODIS_DEFAULT_REFRESH_INTERVAL),
     Simulation = maps:get(simulation, Opts, false),
     Conf = #conf {
 	      simulation = Simulation,
@@ -255,7 +261,8 @@ init([InputOpts]) ->
 	      magic = Magic,
 	      ping_interval = PingInterval,
 	      ping_delay = PingDelay,
-	      max_pings_lost = MaxPingsLost
+	      max_pings_lost = MaxPingsLost,
+	      refresh_interval = RefreshInterval
 	     },
     case Simulation of
 	true ->
@@ -335,6 +342,11 @@ handle_call({subscribe,Pid}, _From, S) ->
     Mon = erlang:monitor(process, Pid),
     Sub = #sub { ref=Mon, pid=Pid },
     Subs = (S#s.subs)#{ Mon => Sub },
+    %% deliver current nodes
+    lists:foreach(
+      fun(N) ->
+	      Sub#sub.pid ! {nodis, Sub#sub.ref, {up,N#node.addr}}
+      end, S#s.node_list),
     {reply, {ok,Mon}, S#s { subs = Subs }};
 handle_call({unsubscribe,Ref}, _From, S) ->
     case maps:take(Ref, S#s.subs) of
@@ -451,7 +463,8 @@ handle_node(Addr,IVal,S) ->
 	false ->
 	    Time = erlang:monotonic_time(),
 	    Node = #node { addr = Addr, ival = IVal,
-			   first_seen = Time, last_seen = Time },
+			   first_seen = Time, last_seen = Time,
+			   last_up = Time },
 	    notify_subs(S, {up, Addr}),
 	    {noreply, S#s { node_list = [Node | NodeList0] }};
 	{value, Node0, NodeList} ->
@@ -475,7 +488,15 @@ gc_nodes_([N|Ns], Now, MaxPingsLost, S) ->
 	    notify_subs(S, {missed, N#node.addr}),
 	    [N | gc_nodes_(Ns, Now, MaxPingsLost, S)];
        true ->
-	    [N | gc_nodes_(Ns, Now, MaxPingsLost,S)]
+	    UTime = erlang:convert_time_unit(Now-N#node.last_up,native,millisecond),
+	    %% should keep refresh_interal > N#node.ival*MaxPingsLost
+	    if UTime > (S#s.conf)#conf.refresh_interval ->
+		    notify_subs(S, {up, N#node.addr}),
+		    [ N#node { last_up = Now } | 
+		      gc_nodes_(Ns, Now, MaxPingsLost,S)];
+	       true ->
+		    [N | gc_nodes_(Ns, Now, MaxPingsLost,S)]
+	    end
     end;
 gc_nodes_([], _Now, _MaxPingsLost, _S) ->
     [].

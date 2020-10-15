@@ -16,3 +16,5 @@ clean:
 %.beam: %.erl
 	env $(ERLC) $(ERLC_FLAGS) $<
 #@END-TEST-DEFAULT-RULES@
+
+runtest:

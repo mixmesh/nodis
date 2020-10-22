@@ -68,26 +68,43 @@
 	   string() => [ifindex_t()],
 	   ifindex_t() => [inet:ip_address()] }.
 
+-define(NODIS_DEFAULT_PING_DELAY, 1000). %% 1s before first ping
+-define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
+-define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
+-define(NODIS_DEFAULT_REFRESH_INTERVAL, 30000). %% test 30seconds
+%% -define(NODIS_DEFAULT_REFRESH_INTERVAL, (5*60*1000)). %% 5min
+
+-define(NODIS_DEFAULT_MAX_UP_NODES,      10).
+-define(NODIS_DEFAULT_MAX_PENDING_NODES, 100).
+-define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
+-define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
+
 -record(conf,
 	{
+	 input = #{} :: nodis_option(), %% input options (override!)
 	 simulation = false :: boolean(),
 	 hops :: non_neg_integer(),   %% max number of hops (ttl)
 	 loop :: boolean(),           %% loop on host (other applications)
 	 magic :: binary(),           %% magic ping
-	 ping_delay :: time_ms(),     %% start delay til first ping
-	 ping_interval :: time_ms(),  %% then send with this interval
-	 refresh_interval :: time_ms(),  %% refresh send up to subscribers
-	 max_pings_lost :: non_neg_integer(), %% down if we missed pings
+	 %% delay until first ping
+	 ping_delay = ?NODIS_DEFAULT_PING_DELAY :: time_ms(),
+	 %% after that send with this interval
+	 ping_interval = ?NODIS_DEFAULT_PING_INTERVAL :: time_ms(),
+	 %% down if we missed this number of pings
+	 max_pings_lost = ?NODIS_DEFAULT_MAX_PINGS_LOST :: non_neg_integer(),
+	 %% resend up after refresh_interval
+	 refresh_interval = ?NODIS_DEFAULT_REFRESH_INTERVAL :: time_ms(),  
 	 %% max number of nodes in up state
-	 max_up_nodes :: non_neg_integer(),
+	 max_up_nodes = ?NODIS_DEFAULT_MAX_UP_NODES :: non_neg_integer(),
 	 %% max number of nodes in pending state, waiting to get up
-	 max_pending_nodes :: non_neg_integer(),
-	 %% max number of remembered nodes that have been pending|up
-	 max_down_nodes :: non_neg_integer(),
+	 max_pending_nodes = ?NODIS_DEFAULT_MAX_PENDING_NODES :: 
+	   non_neg_integer(),
 	 %% max number of nodes that have been reschduled after up
 	 %% timeout or marked as done (but still up)
 	 %% wait nodes will then be put on pending -> up state when possible
-	 max_wait_nodes :: non_neg_integer()
+	 max_wait_nodes = ?NODIS_DEFAULT_MAX_WAIT_NODES :: non_neg_integer(),
+	 %% max number of remembered nodes that have been pending|up
+	 max_down_nodes = ?NODIS_DEFAULT_MAX_DOWN_NODES :: non_neg_integer()
 	}).
 
 -record(s,
@@ -133,16 +150,6 @@
 -define(NODIS_MULTICAST_IF4,  ?ANY4).
 -define(NODIS_MULTICAST_IF6,  ?ANY6).
 
--define(NODIS_DEFAULT_PING_DELAY, 1000). %% 1s before first ping
--define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
--define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
-%% -define(NODIS_DEFAULT_REFRESH_INTERVAL, (5*60*1000)). %% 5min
--define(NODIS_DEFAULT_REFRESH_INTERVAL, 30000). %% test
-
--define(NODIS_DEFAULT_MAX_UP_NODES,      10).
--define(NODIS_DEFAULT_MAX_PENDING_NODES, 100).
--define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
--define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
 
 -type nodis_option() ::
 	#{ simulation => boolean(),
@@ -269,41 +276,22 @@ init([InputOpts]) ->
     Mloop  = maps:get(loop, Opts, true),
     Laddr0 = maps:get(ifaddr, Opts, Device),
     Magic  = maps:get(magic, Opts, ?NODIS_MAGIC),
-    PingInterval = maps:get(ping_interval,Opts,?NODIS_DEFAULT_PING_INTERVAL),
-    PingDelay = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_PING_DELAY),
-    MaxPingsLost = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_MAX_PINGS_LOST),
-    RefreshInterval = maps:get(refresh_interval,Opts,?NODIS_DEFAULT_REFRESH_INTERVAL),
     Simulation = maps:get(simulation, Opts, false),
     Simulator = case config:lookup([simulator], false) of
 		    false -> false;
 		    _ -> true
 		end,
-    MaxUpNodes = maps:get(max_up_nodes, Opts,
-			  ?NODIS_DEFAULT_MAX_UP_NODES),
-    MaxPendingNodes = maps:get(max_pending_nodes, Opts, 
-			    ?NODIS_DEFAULT_MAX_PENDING_NODES),
-    MaxDownNodes = maps:get(max_down_nodes, Opts, 
-			    ?NODIS_DEFAULT_MAX_DOWN_NODES),
-    MaxWaitNodes = maps:get(max_wait_nodes, Opts, 
-			    ?NODIS_DEFAULT_MAX_WAIT_NODES),
+    Conf0 = #conf {
+	       input  = InputOpts,  %% keep override options
+	       simulation = Simulation orelse Simulator,
+	       hops  = Mhops,
+	       loop  = Mloop,
+	       magic = Magic },
+    Conf = read_conf(Conf0, Opts),
 
-    Conf = #conf {
-	      simulation = Simulation orelse Simulator,
-	      hops  = Mhops,
-	      loop  = Mloop,
-	      magic = Magic,
-	      ping_interval = PingInterval,
-	      ping_delay = PingDelay,
-	      max_pings_lost = MaxPingsLost,
-	      refresh_interval = RefreshInterval,
-	      max_up_nodes = MaxUpNodes,
-	      max_pending_nodes = MaxPendingNodes,
-	      max_down_nodes = MaxDownNodes,
-	      max_wait_nodes = MaxWaitNodes
-	     },
     case Simulation of
 	true ->
-	    PingTmr = start_ping(PingDelay),
+	    PingTmr = start_ping(Conf#conf.ping_delay),
 	    {ok, #s{
 		     conf  = Conf,
 		     ping_tmr = PingTmr
@@ -346,7 +334,7 @@ init([InputOpts]) ->
 		    case catch gen_udp:open(MPort,RecvOpts) of
 			{ok,In} ->
 			    inet:setopts(In, [{active, true}]),
-			    PingTmr = start_ping(PingDelay),
+			    PingTmr = start_ping(Conf#conf.ping_delay),
 			    {ok, #s{ in    = In,
 				     out   = Out,
 				     maddr = MAddr,
@@ -449,6 +437,10 @@ handle_info({timeout,Tmr,ping}, S) when Tmr =:= S#s.ping_tmr ->
     PingTmr = start_ping((S#s.conf)#conf.ping_interval),
     S1 = gc_nodes(S),
     {noreply, S1#s { ping_tmr = PingTmr }};
+handle_info(reload, S) ->
+    Conf = read_conf(S#s.conf),
+    %% FIXME: add code to adjust node lists according to above
+    {noreply, S#s{conf=Conf}};
 handle_info({'DOWN',Ref,process,_Pid,_Reason}, S) ->
     case maps:take(Ref, S#s.subs) of
 	error ->
@@ -482,14 +474,52 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%--------------------------------------------------------------------
 
+read_conf(Conf) ->
+    read_conf(Conf, Conf#conf.input).
+
+read_conf(Conf, InputOpts) ->
+    read_conf_(Conf, read_options(InputOpts)).
+
+read_conf_(Conf, Map) ->
+    PingDelay = maps:get('ping-delay',Map,Conf#conf.ping_delay),
+    PingInterval = maps:get('ping-interval',Map,Conf#conf.ping_interval),
+    MaxPingsLost = maps:get('max-pings-lost',Map,Conf#conf.max_pings_lost),
+    RefreshInterval = maps:get('refresh-interval',Map,
+			       Conf#conf.refresh_interval),
+    MaxUpNodes = maps:get('max-up-nodes',Map,Conf#conf.max_up_nodes),
+    MaxPendingNodes = maps:get('max-pending-nodes',Map,
+			       Conf#conf.max_pending_nodes),
+    MaxDownNodes = maps:get('max-down-nodes',Map,Conf#conf.max_down_nodes),
+    MaxWaitNodes = maps:get('max-wait-nodes',Map,Conf#conf.max_wait_nodes),
+    Conf#conf {
+      ping_interval = PingInterval,
+      ping_delay = PingDelay,
+      max_pings_lost = MaxPingsLost,
+      refresh_interval = RefreshInterval,
+      max_up_nodes = MaxUpNodes,
+      max_pending_nodes = MaxPendingNodes,
+      max_down_nodes = MaxDownNodes,
+      max_wait_nodes = MaxWaitNodes
+     }.
+
 %% input options override environment options
 read_options(InputOpts) ->
-    Env = maps:from_list(application:get_all_env(nodis)),
+    Env = read_all_env(),
+    io:format("Env = ~p\n", [Env]),
     if is_map(InputOpts) ->
 	    maps:merge(Env, InputOpts);
        is_list(InputOpts) ->
 	    maps:merge(Env, maps:from_list(InputOpts))
     end.
+
+read_all_env() ->
+    case application:get_env(nodis, nodis) of
+	{ok,[{nodis,Opts}]} when is_list(Opts) ->
+	    maps:from_list(Opts);
+	_ -> %% assume application style options
+	    maps:from_list(application:get_all_env(nodis))
+    end.
+
 
 start_ping(Delay) when is_integer(Delay), Delay > 0 ->
     erlang:start_timer(Delay, self(), ping).

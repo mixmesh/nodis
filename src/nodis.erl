@@ -22,25 +22,26 @@ stop() ->
     application:stop(nodis).
 
 i() ->
-    nodis_srv:i().
+    nodis_serv:i().
 
 i(Pid) ->
-    nodis_srv:i(Pid).
+    nodis_serv:i(Pid).
 
 subscribe() ->
-    nodis_srv:subscribe().
+    nodis_serv:subscribe().
 
 subscribe(Pid) ->
-    nodis_srv:subscribe(Pid).
+    nodis_serv:subscribe(Pid).
 
 unsubscribe(Ref) ->
-    nodis_srv:unsubscribe(Ref).
+    nodis_serv:unsubscribe(Ref).
 
 unsubscribe(Pid,Ref) ->
-    nodis_srv:unsubscribe(Pid,Ref).
+    nodis_serv:unsubscribe(Pid,Ref).
 
 config_change(_Changed,_New,_Removed) ->
     ?dbg_log_fmt("config_change changed=~w, new=~w, removed=~w\n", 
 		 [_Changed,_New,_Removed]),
+    nodis_serv ! reload,
     ok.
     

@@ -12,19 +12,18 @@ so that pending nodes may be served.
 
 .* MAX\_UP\_NODES = 10
  A node stays in up state until it has been served
- and marked as waiting or node stops pining and is
+ and marked as waiting or if node stops pinging and is
  marked as down
 
 .* MAX\_PENDING\_NODES = 100
  A node will be pending and queued until 
  there is a slot among nodes in up state,
  that is when node_count(up) < MAX\_UP\_NODES
- A node can be marked to wait
 
 .* MAX\_DOWN\_NODES = 2000
  A node that does not send timely pings will be considered
  in a down state. And can come from up, pending and wait states
- When a node response again it will be moved to pending state
+ When a node respond again it will be moved to pending state
 
 .* MAX\_WAIT\_NODES = 1000
  After node has been served it can be marked to

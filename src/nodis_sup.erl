@@ -39,7 +39,6 @@ stop() ->
 %%----------------------------------------------------------------------
 %%----------------------------------------------------------------------
 init(Args) ->
-    Noder = {nodis_srv, {nodis_srv, start_link, [Args]},
-	     permanent, 5000, worker, [nodis_srv]},
-    {ok,{{one_for_all,3,5}, [Noder]}}.
-
+    Nodis = {nodis_serv_0, {nodis_serv, start_link_local, [Args]},
+	     permanent, 5000, worker, [nodis_serv_0]},
+    {ok,{{one_for_all,3,5}, [Nodis]}}.

@@ -3,7 +3,7 @@
  [{description, "Node discovery on multicast network"},
   {vsn, "%VSN%"},
   {modules, [%MODULES%]},
-  {registered, [nodis_srv]},
+  {registered, [nodis_serv]},
   {mod,{nodis_app,[]}},
   {env, []},
   {applications,[kernel,stdlib]}

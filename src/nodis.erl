@@ -13,6 +13,8 @@
 -export([subscribe/1, unsubscribe/2]).
 -export([i/0, i/1]).
 
+-include_lib("apptools/include/log.hrl").
+
 start() ->
     application:start(nodis).
 
@@ -38,5 +40,7 @@ unsubscribe(Pid,Ref) ->
     nodis_srv:unsubscribe(Pid,Ref).
 
 config_change(_Changed,_New,_Removed) ->
+    ?dbg_log_fmt("config_change changed=~w, new=~w, removed=~w\n", 
+		 [_Changed,_New,_Removed]),
     ok.
     

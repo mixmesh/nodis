@@ -13,9 +13,10 @@
 -include_lib("apptools/include/shorthand.hrl").
 
 get() ->
-    [{'nodis',
-      {'ping-interval',
-       #json_type{name = {integer,50,1000000},
-		  info = "Interval in ms between multicast pings",
-		  typical = 5000 }}
+    [{nodis,
+      [{'ping-interval',
+	#json_type{name = {integer,50,1000000},
+		   info = "Interval in ms between multicast pings",
+		   typical = 5000 }}
+      ]
      }].

@@ -5,7 +5,7 @@
 %%% @end
 %%% Created : 28 Sep 2020 by Tony Rogvall <tony@rogvall.se>
 
--module(nodis_srv).
+-module(nodis_serv).
 
 -behaviour(gen_server).
 
@@ -227,7 +227,7 @@ send(Data) ->
 send(Pid, Data) ->
     gen_server:call(Pid,{send,Data}).
 
-%% simulation feed nodis_srv with simulated ping data
+%% simulation feed nodis_serv with simulated ping data
 %% will show up with the player subscriver as
 %% {up, {A,B,C,D,Port}}
 %% {missed, {A,B,C,D,Port}}
@@ -274,7 +274,10 @@ init([InputOpts]) ->
     MaxPingsLost = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_MAX_PINGS_LOST),
     RefreshInterval = maps:get(refresh_interval,Opts,?NODIS_DEFAULT_REFRESH_INTERVAL),
     Simulation = maps:get(simulation, Opts, false),
-
+    Simulator = case config:lookup([simulator], false) of
+		    false -> false;
+		    _ -> true
+		end,
     MaxUpNodes = maps:get(max_up_nodes, Opts,
 			  ?NODIS_DEFAULT_MAX_UP_NODES),
     MaxPendingNodes = maps:get(max_pending_nodes, Opts, 
@@ -285,7 +288,7 @@ init([InputOpts]) ->
 			    ?NODIS_DEFAULT_MAX_WAIT_NODES),
 
     Conf = #conf {
-	      simulation = Simulation,
+	      simulation = Simulation orelse Simulator,
 	      hops  = Mhops,
 	      loop  = Mloop,
 	      magic = Magic,

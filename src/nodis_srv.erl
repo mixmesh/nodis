@@ -54,6 +54,7 @@
 
 -record(node,
 	{
+	 state = undefined :: up | down | wait | pending,
 	 addr :: inet:ip_address() | sim_address(),  %% ip address of node
 	 ival :: time_ms(),          %% node announce to send this often in ms
 	 first_seen :: tick(),       %% first time around
@@ -76,7 +77,17 @@
 	 ping_delay :: time_ms(),     %% start delay til first ping
 	 ping_interval :: time_ms(),  %% then send with this interval
 	 refresh_interval :: time_ms(),  %% refresh send up to subscribers
-	 max_pings_lost :: non_neg_integer()  %% down if we missed pings
+	 max_pings_lost :: non_neg_integer(), %% down if we missed pings
+	 %% max number of nodes in up state
+	 max_up_nodes :: non_neg_integer(),
+	 %% max number of nodes in pending state, waiting to get up
+	 max_pending_nodes :: non_neg_integer(),
+	 %% max number of remembered nodes that have been pending|up
+	 max_down_nodes :: non_neg_integer(),
+	 %% max number of nodes that have been reschduled after up
+	 %% timeout or marked as done (but still up)
+	 %% wait nodes will then be put on pending -> up state when possible
+	 max_wait_nodes :: non_neg_integer()
 	}).
 
 -record(s,
@@ -128,6 +139,11 @@
 %% -define(NODIS_DEFAULT_REFRESH_INTERVAL, (5*60*1000)). %% 5min
 -define(NODIS_DEFAULT_REFRESH_INTERVAL, 30000). %% test
 
+-define(NODIS_DEFAULT_MAX_UP_NODES,      10).
+-define(NODIS_DEFAULT_MAX_PENDING_NODES, 100).
+-define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
+-define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
+
 -type nodis_option() ::
 	#{ simulation => boolean(),
 	   magic =>  binary(),
@@ -141,7 +157,11 @@
 	   ping_delay => time_ms(),
 	   ping_interval => time_ms(),
 	   refresh_interval => time_ms(),
-	   max_pings_lost => non_neg_integer()
+	   max_pings_lost => non_neg_integer(),
+	   max_up_nodes => non_neg_integer(),
+	   max_pending_nodes => non_neg_integer(),
+	   max_down_nodes => non_neg_integer(),
+	   max_wait_nodes => non_neg_integer()
 	 }.
 
 %%====================================================================
@@ -254,6 +274,16 @@ init([InputOpts]) ->
     MaxPingsLost = maps:get(max_pings_lost,Opts,?NODIS_DEFAULT_MAX_PINGS_LOST),
     RefreshInterval = maps:get(refresh_interval,Opts,?NODIS_DEFAULT_REFRESH_INTERVAL),
     Simulation = maps:get(simulation, Opts, false),
+
+    MaxUpNodes = maps:get(max_up_nodes, Opts,
+			  ?NODIS_DEFAULT_MAX_UP_NODES),
+    MaxPendingNodes = maps:get(max_pending_nodes, Opts, 
+			    ?NODIS_DEFAULT_MAX_PENDING_NODES),
+    MaxDownNodes = maps:get(max_down_nodes, Opts, 
+			    ?NODIS_DEFAULT_MAX_DOWN_NODES),
+    MaxWaitNodes = maps:get(max_wait_nodes, Opts, 
+			    ?NODIS_DEFAULT_MAX_WAIT_NODES),
+
     Conf = #conf {
 	      simulation = Simulation,
 	      hops  = Mhops,
@@ -262,7 +292,11 @@ init([InputOpts]) ->
 	      ping_interval = PingInterval,
 	      ping_delay = PingDelay,
 	      max_pings_lost = MaxPingsLost,
-	      refresh_interval = RefreshInterval
+	      refresh_interval = RefreshInterval,
+	      max_up_nodes = MaxUpNodes,
+	      max_pending_nodes = MaxPendingNodes,
+	      max_down_nodes = MaxDownNodes,
+	      max_wait_nodes = MaxWaitNodes
 	     },
     case Simulation of
 	true ->
@@ -462,7 +496,8 @@ handle_node(Addr,IVal,S) ->
     case lists:keytake(Addr, #node.addr, NodeList0) of
 	false ->
 	    Time = erlang:monotonic_time(),
-	    Node = #node { addr = Addr, ival = IVal,
+	    Node = #node { state = up, 
+			   addr = Addr, ival = IVal,
 			   first_seen = Time, last_seen = Time,
 			   last_up = Time },
 	    notify_subs(S, {up, Addr}),
@@ -529,8 +564,9 @@ dump_nodes([N|Ns], I, Now, MaxPingsLost) ->
 	    Addr ->
 		inet:ntoa(Addr)
 	end,
-    io:format("~w: ~s uptime: ~.2fs last: ~.2fs ival=~w status=~s\n",
-	      [I, AddrString,
+    io:format("~w: ~w ~s uptime: ~.2fs last: ~.2fs ival=~w status=~s\n",
+	      [I, N#node.state, 
+	       AddrString,
 	       UTime/1000000,
 	       LTime/1000000,
 	       N#node.ival,
@@ -721,3 +757,22 @@ send_message(Data, S) ->
 	    ?dbg("gen_udp: failure=~p\n", [_Error]),
 	    {{error,_Error}, S}
     end.
+
+%% insert in various queues
+%% a node can only be in one state at a time
+
+%% move node to up state, or insert in up state
+node_up(_Node, _Nodes) ->
+    ok.
+
+%% move node to pending state, or insert in pending state
+node_pending(_Node, _Nodes) ->
+    ok.
+
+%% move node to down state
+node_down(_Node, _Nodes) ->
+    ok.
+
+%% move node to wait state
+node_wait(_Node, _Nodes) ->
+    ok.

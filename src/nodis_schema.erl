@@ -25,13 +25,16 @@ get() ->
        {'max-pings-lost',
 	#json_type{name = {integer,1,1000},
 		   info = "Number of pings missing before nodes are regarded "
-		   "as down",
+		   "as down.",
 		   typical = 3 }},
-       {'refresh-interval',
+       {'min-wait-time',
 	#json_type{name = {integer,50,1000000},
-		   info = "Interval in ms between reactivation of nodes, "
-		   "from wait state to pending.",
+		   info = "Minimum time to wait before a node can be up again.",
 		   typical = 300000 }}, %% 5 min
+       {'min-down-time',
+	#json_type{name = {integer,50,1000000},
+		   info = "Minimum time to wait before a failed node is allowed back.",
+		   typical = 600000 }}, %% 10 min
        {'max-up-nodes',
 	#json_type {name = {integer,1,10000},
 		    info = "Max number of nodes that can be in state up,"

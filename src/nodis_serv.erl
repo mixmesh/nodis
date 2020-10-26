@@ -707,14 +707,16 @@ down_nodes(NodeMap, Down, Now, MaxPingsLost, S) ->
       fun(_Addr, N=#node{last_seen=LastSeen}, Acc) ->
 	      LTime = time_diff_us(Now, LastSeen),
 	      if LTime > N#node.ival*MaxPingsLost*1000 ->
-		      if N#node.state =:= up ->
+		      if N#node.state =:= up;
+			 N#node.state =:= pending ->
 			      notify_subs(S, {down, N#node.addr});
 			 true ->
 			      ok
 		      end,
 		      [N#node{down_tick=Now}|Acc];
 		 LTime > N#node.ival*1000 ->
-		      if N#node.state =:= up ->
+		      if N#node.state =:= up;
+			 N#node.state =:= pending ->
 			      notify_subs(S, {missed, N#node.addr});
 			 true ->
 			      ok

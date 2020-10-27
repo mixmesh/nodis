@@ -21,11 +21,7 @@
 -include_lib("apptools/include/log.hrl").
 
 -type node_state() :: undefined |up | down | wait | pending.
--type short() :: 0..65535.
--type sim_address() :: {byte(), byte(), byte(), byte(), inet:port_number()} |
-		       {short(), short(), short(), short(),
-			short(), short(), short(), short(), inet:port_number()}.
--type node_address() :: inet:ip_address() | sim_address().
+-type node_address() :: {inet:ip_address(), inet:port_number()}.
 
 start() ->
     application:start(nodis).

@@ -52,8 +52,6 @@
 	 pid :: pid()
 	}).
 
-
-
 -record(node,
 	{
 	 state = undefined :: nodis:node_state(),
@@ -127,8 +125,9 @@
 	 out,         %% outgoing udp socket
 	 maddr,       %% multicast address
 	 ifaddr,      %% interface address
-	 mport,       %% port number used
-	 oport,       %% output port number used
+	 %% fixme: add 'multicast-port' 'source-port' in config
+	 mport :: inet:port_number(), %% nodis multicast port
+	 oport :: inet:port_number(), %% nodis sending port (mport+1)
 	 conf :: #conf{},
 	 ping_tmr,    %% multicase ping each timeout
 	 nodes = #nodes{} :: #nodes{},
@@ -159,7 +158,7 @@
 -define(NODIS_MAGIC, <<"ERLGAMAL">>).
 -define(NODIS_MULTICAST_ADDR4, {224,0,0,1}).
 -define(NODIS_MULTICAST_ADDR6, {16#FF12,0,0,0,0,0,0,1234}).
--define(NODIS_UDP_PORT,        51812).
+-define(NODIS_DEFAULT_UDP_PORT, 9900).  %% match obscrete sync port
 
 -define(NODIS_MULTICAST_IF4,  ?ANY4).
 -define(NODIS_MULTICAST_IF6,  ?ANY6).
@@ -277,12 +276,12 @@ simping(Pid, {A,B,C,D}, Port, IVal) when
       (A bor B bor C bor D) band (bnot 16#ff) =:= 0,
       is_integer(Port),
       is_integer(IVal) ->
-    gen_server:cast(Pid, {simping,{A,B,C,D,Port},IVal});
+    gen_server:cast(Pid, {simping,{{A,B,C,D},Port},IVal});
 simping(Pid, {A,B,C,D,E,F,G,H}, Port, IVal) when
       (A bor B bor C bor D bor E bor F bor G bor H) band (bnot 16#ffff) =:= 0,
       is_integer(Port),
       is_integer(IVal) ->
-    gen_server:cast(Pid, {simping,{A,B,C,D,E,F,G,H,Port},IVal}).
+    gen_server:cast(Pid, {simping,{{A,B,C,D,E,F,G,H},Port},IVal}).
 
 %% util
 select_any(inet) -> ?ANY4;
@@ -311,6 +310,8 @@ init([InputOpts]) ->
     Family = maps:get(family, Opts, inet),
     Device = maps:get(device, Opts, undefined),
     MAddr  = maps:get(maddr, Opts,  select_mcast(Family)),
+    MPort  = maps:get(mport, Opts,  ?NODIS_DEFAULT_UDP_PORT),
+    OPort  = maps:get(oport, Opts,  MPort+1),
     Mhops  = maps:get(hops, Opts, 1),
     Mloop  = maps:get(loop, Opts, true),
     Laddr0 = maps:get(ifaddr, Opts, Device),
@@ -331,12 +332,12 @@ init([InputOpts]) ->
     case Simulation of
 	true ->
 	    PingTmr = start_ping(Conf#conf.ping_delay),
-	    {ok, #s{
+	    {ok, #s{ mport = MPort,
+		     oport = OPort,
 		     conf  = Conf,
 		     ping_tmr = PingTmr
 		   }};
 	false ->
-	    MPort = ?NODIS_UDP_PORT,
 	    AddrMap = make_addr_map(),
 	    Laddr = if is_tuple(Laddr0) ->
 			    Laddr0;
@@ -361,9 +362,13 @@ init([InputOpts]) ->
 				     {multicast_if,Laddr},
 				     {multicast_ttl,Mhops},
 				     {multicast_loop,Mloop}]]),
-	    case gen_udp:open(0, SendOpts) of
+	    case gen_udp:open(OPort, SendOpts) of
 		{ok,Out} ->
-		    {ok,OutPort} = inet:port(Out),
+		    OutPort = 
+			case inet:port(Out) of
+			    {ok,OPort}  -> OPort;
+			    {ok,OPort1} when OPort =:= 0 -> OPort1
+			end,
 		    ?dbg("output port = ~w\n", [OutPort]),
 		    RecvOpts = [Family,{reuseaddr,true},
 				{mode,binary},{active,false}] ++
@@ -460,8 +465,9 @@ handle_call(_Request, _From, S) ->
 handle_cast({send,Mesg}, S) ->
     {_, S1} = send_message(Mesg, S),
     {noreply, S1};
-handle_cast({simping,Addr,IVal}, S) ->
-    handle_node(Addr,IVal,S);
+handle_cast({simping,{IP,Port},IVal}, S) ->
+    NAddr = {IP,Port-1},
+    handle_node(NAddr,IVal,S);
 handle_cast(_Mesg, S) ->
     ?dbg("nodis: handle_cast: ~p\n", [_Mesg]),
     {noreply, S}.
@@ -472,27 +478,23 @@ handle_cast(_Mesg, S) ->
 %%                                       {stop, Reason, State}
 %% Description: Handling all non call/cast messages
 %%--------------------------------------------------------------------
-handle_info({udp,U,Addr0,Port,Data}, S) when S#s.in == U ->
-    IsLocalAddress = maps:get(Addr0, S#s.addr_map, []) =/= [],
+handle_info({udp,U,Addr,Port,Data}, S) when S#s.in == U ->
+    IsLocalAddress = maps:get(Addr, S#s.addr_map, []) =/= [],
     ?dbg("nodis: udp ~s:~w (~s) ~p\n",
 	 [inet:ntoa(Addr),Port, if IsLocalAddress -> "local";
 				   true -> "remote" end, Data]),
     if IsLocalAddress, Port =:= S#s.oport -> %% this is our output! (loop=true)
-	    %%?dbg("nodis: discard ~s:~w ~p\n",  [inet:ntoa(Addr0),Port,Data]),
+	    %%?dbg("nodis: discard ~s:~w ~p\n",  [inet:ntoa(Addr),Port,Data]),
 	    {noreply, S};
        true ->
-	    Addr = if IsLocalAddress -> %% testing locally
-			   erlang:append_element(Addr0, Port);
-		      true ->
-			   Addr0
-		   end,
+	    NAddr = {Addr,Port-1},
 	    case Data of
 		<<MLen:32, Magic:MLen/binary, IVal:32, _Garbage/binary>> when
 		      Magic =:= (S#s.conf)#conf.magic ->
-		    handle_node(Addr,IVal,S);
+		    handle_node(NAddr,IVal,S);
 		_ ->
-		    ?dbg("ignored data from ~s:~w = ~p\n",
-			 [format_addr(Addr),Port,Data]),
+		    ?dbg("ignored data from ~s = ~p\n",
+			 [format_addr(NAddr),Data]),
 		    {noreply, S}
 	    end
     end;
@@ -746,7 +748,7 @@ dump_state(S) ->
 
 dump_nodes(Map, I0, Now, MaxPingsLost) ->
     maps:fold(
-      fun(Addr,N=#node{state=State,first_seen=FT,last_seen=LT},I) ->
+      fun(NAddr,N=#node{state=State,first_seen=FT,last_seen=LT},I) ->
 	      UTime = time_diff_us(Now,FT),
 	      LTime = time_diff_us(Now,LT),
 	      LTm = 
@@ -757,7 +759,7 @@ dump_nodes(Map, I0, Now, MaxPingsLost) ->
 		     true ->
 			  ok
 		  end,
-	      AddrString = format_addr(Addr),
+	      AddrString = format_addr(NAddr),
 	      io:format("~w: state=~w ~s uptime: ~.2fs last: ~.2fs ival=~w ltm=~s\n",
 			[I, State, 
 			 AddrString,
@@ -774,16 +776,13 @@ time_diff_ms(A, B) ->
 time_diff_us(A, B) ->
     erlang:convert_time_unit(A - B,native,microsecond).
 
-format_addr(Addr) ->
-    case Addr of
-	{A,B,C,D,Port} -> %% from simulation/test
-	    inet:ntoa({A,B,C,D}) ++ ":" ++ 
-		integer_to_list(Port);
-	{A,B,C,D,E,F,G,H,Port} -> %% from simulation/test
-	    "["++inet:ntoa({A,B,C,D,E,F,G,H}) ++ "]:" ++ 
-		integer_to_list(Port);
-	Addr ->
-	    inet:ntoa(Addr)
+format_addr(NAddr) ->
+    case NAddr of
+	{Addr,Port} when tuple_size(Addr) =:= 4 -> 
+	    inet:ntoa(Addr) ++ ":" ++ integer_to_list(Port);
+	{Addr,Port} when tuple_size(Addr) =:= 6 -> 
+	    "["++inet:ntoa(Addr) ++ "]:" ++ 
+		integer_to_list(Port)
     end.
 
 %% socket options
@@ -980,7 +979,6 @@ find_node_(Addr, [Map|Ms]) ->
     end;
 find_node_(_Addr, []) ->
     false.
-
 
 -spec take_node(Addr::nodis:node_address(), #nodes{}) ->
 	  false | {#node{}, map()}.

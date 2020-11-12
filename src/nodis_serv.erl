@@ -430,9 +430,8 @@ handle_call({wait,Addr}, _From, S) ->
 	false ->
 	    {reply, {error, not_found}, S};  %% node not found
 	N when N#node.state =:= up ->
-	    %% maybe notify down message? probably not... depends
+	    notify_subs(S, {wait, N#node.addr}),
 	    Now = erlang:monotonic_time(),
-	    %% well we do not notify wait since we where informed to wait
 	    Nodes = move_node_wait(N, S#s.nodes, Now),
 	    {reply, ok, S#s { nodes = Nodes}};
 	_N ->
@@ -669,6 +668,8 @@ gc_nodes(S) ->
     Time = erlang:monotonic_time(),
     MaxPingsLost = (S#s.conf)#conf.max_pings_lost,
     Nodes = gc_nodes_(S#s.nodes, Time, MaxPingsLost, S),
+    %% io:format("GC nodes (from addr:~w)\n", [S#s.oport]),
+    %% dump_nodes(Nodes, (S#s.conf)#conf.max_pings_lost),
     S#s{ nodes = Nodes }.
 
 gc_nodes_(Nodes, Now, MaxPingsLost, S) ->
@@ -736,9 +737,10 @@ notify_subs(S, Message) ->
       end, ok, S#s.subs).
 
 dump_state(S) ->
+    dump_nodes(S#s.nodes,(S#s.conf)#conf.max_pings_lost).
+
+dump_nodes(Nodes, MaxPingsLost) ->
     Time = erlang:monotonic_time(),
-    MaxPingsLost = (S#s.conf)#conf.max_pings_lost,
-    Nodes = S#s.nodes,
     N0 = 1,
     N1 = dump_nodes(Nodes#nodes.up, N0, Time, MaxPingsLost),
     N2 = dump_nodes(Nodes#nodes.pending, N1, Time, MaxPingsLost),

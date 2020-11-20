@@ -16,6 +16,8 @@
 -export([subscribe/0, unsubscribe/1]).
 -export([subscribe/1, unsubscribe/2]).
 -export([wait/1, wait/2]).
+-export([connect/2, connect/3]).
+-export([accept/2, accept/3]).
 -export([get_state/1, get_state/2]).
 
 %% test
@@ -26,7 +28,6 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
-
 
 -export([reuse_port/0]).
 
@@ -43,7 +44,8 @@
 -define(SERVER, ?MODULE).
 
 -type time_ms() :: non_neg_integer().
--type tick()    :: integer().  %% monotonic tick
+-type tick()    :: integer().
+-type timer()   :: reference().
 
 %% subscriber for node events
 -record(sub,
@@ -52,15 +54,23 @@
 	 pid :: pid()
 	}).
 
+-record(node_counter,
+	{
+	 state = undefined,  %% keypos=2
+	 count = 0
+	}).
+
 -record(node,
 	{
-	 state = undefined :: nodis:node_state(),
-	 addr :: nodis:node_address(),  %% ip address of node
-	 ival :: time_ms(),          %% node announce to send this often in ms
-	 first_seen :: tick(),       %% first time around
-	 last_seen :: tick(),        %% we have not seen the node since
-	 up_tick :: tick(),          %% tick when ws sent up message
-	 down_tick :: tick()         %% tick when marked as down
+	 addr :: nodis:addr(),  %% ip address of node (keypos=2)
+	 state :: nodis:node_state(),
+	 con = none  :: none | connect | accept,
+	 dt_ms = 0 :: time_ms(),  %% added to wait time / down time
+	 ival  :: time_ms(),     %% node announce to send this often in ms
+	 first_seen :: tick(),   %% first time around
+	 last_seen :: tick(),    %% we have not seen the node since
+	 up_tick :: tick(),      %% tick when ws sent up message
+	 down_tick :: tick()     %% tick when marked as down
 	}).
 
 -type ifindex_t() :: non_neg_integer().
@@ -77,7 +87,6 @@
 %% -define(NODIS_DEFAULT_MIN_WAIT_TIME, (5*60*1000)).  %% 5min
 %% -define(NODIS_DEFAULT_MIN_DOWN_TIME, (10*60*1000)). %% 10min
 -define(NODIS_DEFAULT_MAX_UP_NODES,      10).
--define(NODIS_DEFAULT_MAX_PENDING_NODES, 100).
 -define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
 -define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
 
@@ -96,27 +105,14 @@
 	 max_pings_lost = ?NODIS_DEFAULT_MAX_PINGS_LOST :: non_neg_integer(),
 	 %% resend up after min_wait_time
 	 min_wait_time = ?NODIS_DEFAULT_MIN_WAIT_TIME :: time_ms(),  
-	 %% allow down node to be pending after min_down_time
+	 %% allow down node to be up after min_down_time
 	 min_down_time = ?NODIS_DEFAULT_MIN_DOWN_TIME :: time_ms(),  
 	 %% max number of nodes in up state
 	 max_up_nodes = ?NODIS_DEFAULT_MAX_UP_NODES :: non_neg_integer(),
-	 %% max number of nodes in pending state, waiting to get up
-	 max_pending_nodes = ?NODIS_DEFAULT_MAX_PENDING_NODES :: 
-	   non_neg_integer(),
 	 %% max number of nodes that have been reschduled after up
-	 %% timeout or marked as done (but still up)
-	 %% wait nodes will then be put on pending -> up state when possible
 	 max_wait_nodes = ?NODIS_DEFAULT_MAX_WAIT_NODES :: non_neg_integer(),
-	 %% max number of remembered nodes that have been pending|up
+	 %% max number of remembered nodes that have been up
 	 max_down_nodes = ?NODIS_DEFAULT_MAX_DOWN_NODES :: non_neg_integer()
-	}).
-
--record(nodes, 
-	{
-	 up      = #{} :: #{ nodis:node_address() => #node {} },
-	 pending = #{} :: #{ nodis:node_address() => #node {} },
-	 wait    = #{} :: #{ nodis:node_address() => #node {} },
-	 down    = #{} :: #{ nodis:node_address() => #node {} }
 	}).
 
 -record(s,
@@ -128,10 +124,12 @@
 	 %% fixme: add 'multicast-port' 'source-port' in config
 	 mport :: inet:port_number(), %% nodis multicast port
 	 oport :: inet:port_number(), %% nodis sending port (mport+1)
-	 conf :: #conf{},
-	 ping_tmr,    %% multicase ping each timeout
-	 nodes = #nodes{} :: #nodes{},
+	 conf  :: #conf{},
+	 ping_tmr :: timer(),  %% multicase ping each timeout
+	 tab :: ets:tid(),  %% node table
+	 upq :: [nodis:addr()],
 	 subs = #{} :: #{ reference() => #sub{} },
+	 cons = #{} :: #{ reference() => nodis:addr() },
 	 %% string or ip-address-tuple to index-list map
 	 addr_map = #{} :: addr_map_t()
 	}).
@@ -180,7 +178,6 @@
 	   min_down_time => time_ms(),
 	   max_pings_lost => non_neg_integer(),
 	   max_up_nodes => non_neg_integer(),
-	   max_pending_nodes => non_neg_integer(),
 	   max_down_nodes => non_neg_integer(),
 	   max_wait_nodes => non_neg_integer()
 	 }.
@@ -243,21 +240,41 @@ unsubscribe(Pid,Ref) ->
     gen_server:call(Pid, {unsubscribe,Ref}).
 
 %% Put a node from up state into wait state
--spec wait(Addr::nodis:node_address()) -> ok.
+-spec wait(Addr::nodis:addr()) -> ok.
 wait(Addr) ->
     gen_server:call(?SERVER, {wait,Addr}).
 
--spec wait(Pid::pid(), Addr::nodis:node_address()) -> ok.
+-spec wait(Pid::pid(), Addr::nodis:addr()) -> ok.
 wait(Pid,Addr) ->
     gen_server:call(Pid, {wait,Addr}).
 
+
+-spec connect(Addr::nodis:addr(),SyncAddr::nodis:addr()) -> ok.
+connect(Addr,SyncAddr) ->
+    gen_server:call(?SERVER, {connect,self(),Addr,SyncAddr}).
+
+-spec connect(Pid::pid(),Addr::nodis:addr(),
+	      SyncAddr::nodis:addr()) -> ok.
+
+connect(Pid,Addr,SyncAddr) ->
+    gen_server:call(Pid, {connect,self(),Addr,SyncAddr}).
+
+-spec accept(Addr::nodis:addr(),SyncAddr::nods:addr()) -> ok.
+accept(Addr,SyncAddr) ->
+    gen_server:call(?SERVER, {accept,self(),Addr,SyncAddr}).
+
+-spec accept(Pid::pid(),Addr::nods:addr(),SyncAddr::nods:addr()) -> ok.
+
+accept(Pid,Addr,SyncAddr) ->
+    gen_server:call(Pid, {accept,self(),Addr,SyncAddr}).
+
 %% Get neighbour state
--spec get_state(Addr::nodis:node_address()) -> nodis:node_state().
+-spec get_state(Addr::nods:addr()) -> nodis:node_state().
 get_state(Addr) ->
     gen_server:call(?SERVER, {get_state,Addr}).
 
 %% Get neighbour state
--spec get_state(Pid::pid(), Addr::nodis:node_address()) -> nodis:node_state().
+-spec get_state(Pid::pid(), Addr::nods:addr()) -> nodis:node_state().
 get_state(Pid,Addr) ->
     gen_server:call(Pid, {get_state,Addr}).
 
@@ -269,7 +286,7 @@ send(Pid, Data) ->
 %%
 %% simulation feed nodis_serv with simulated ping data
 %% will show up with the player subscriver as
-%% {pending,Addr} | {up, Addr} | {missed, Addr} | {down, Addr}
+%% {up, Addr} | {missed, Addr} | {down, Addr}
 %% NOT {wait,Addr} we must handle this from application
 %%
 simping(Pid, {A,B,C,D}, Port, IVal) when
@@ -317,6 +334,10 @@ init([InputOpts]) ->
     Laddr0 = maps:get(ifaddr, Opts, Device),
     Magic  = maps:get(magic, Opts, ?NODIS_MAGIC),
     Simulation = maps:get(simulation, Opts, false),
+    Tab = ets:new(nodes, [{keypos,#node.addr}]),
+    ets:insert(Tab, #node_counter{state=up}),
+    ets:insert(Tab, #node_counter{state=down}),
+    ets:insert(Tab, #node_counter{state=wait}),
     Simulator = case config_lookup([simulator], false) of
 		    false -> false;
 		    _ -> true
@@ -335,6 +356,8 @@ init([InputOpts]) ->
 	    {ok, #s{ mport = MPort,
 		     oport = OPort,
 		     conf  = Conf,
+		     tab   = Tab,
+		     upq   = [],
 		     ping_tmr = PingTmr
 		   }};
 	false ->
@@ -385,6 +408,8 @@ init([InputOpts]) ->
 				     mport = MPort,
 				     oport = OutPort,
 				     conf  = Conf,
+				     tab   = Tab,
+				     upq   = [],
 				     ping_tmr = PingTmr,
 				     addr_map = AddrMap
 				   }};
@@ -412,10 +437,12 @@ handle_call({subscribe,Pid}, _From, S) ->
     Sub = #sub { ref=Mon, pid=Pid },
     Subs = (S#s.subs)#{ Mon => Sub },
     %% deliver up events to new subscriber
-    maps:fold(
-      fun(Addr,_N,_Acc) ->
-	      Sub#sub.pid ! {nodis, Sub#sub.ref, {up,Addr}}
-      end, ok, (S#s.nodes)#nodes.up),
+    ets:foldl(
+      fun(N, _Acc) when N#node.state =:= up ->
+	      Sub#sub.pid ! {nodis, Sub#sub.ref, {up,N#node.addr}};
+	 (_, Acc) ->
+	      Acc
+      end, ok, S#s.tab),
     {reply, {ok,Mon}, S#s { subs = Subs }};
 handle_call({unsubscribe,Ref}, _From, S) ->
     case maps:take(Ref, S#s.subs) of
@@ -426,25 +453,82 @@ handle_call({unsubscribe,Ref}, _From, S) ->
 	    {reply,ok,S#s { subs=Subs }}
     end;
 handle_call({wait,Addr}, _From, S) ->
-    case find_node(Addr, S#s.nodes) of
+    case read_node(Addr, S) of
 	false ->
-	    {reply, {error, not_found}, S};  %% node not found
+	    {reply, {error, not_found}, S};
 	N when N#node.state =:= up ->
 	    notify_subs(S, {wait, N#node.addr}),
-	    Now = erlang:monotonic_time(),
-	    Nodes = move_node_wait(N, S#s.nodes, Now),
-	    {reply, ok, S#s { nodes = Nodes}};
+	    Now = tick(),
+	    S1 = set_node(wait, N#node { up_tick=Now,con=none,last_seen=Now}, S),
+	    {reply, ok, S1};
 	_N ->
 	    {reply, {error, not_up}, S}
     end;
+%% accept connection to Addr?
+handle_call({connect,SyncPid,Addr,_SyncAddr}, _From, S) ->
+    case read_node(Addr, S) of
+	false ->
+	    {reply, false, S};
+	N when N#node.state =:= up ->
+	    if N#node.con =:= none ->
+		    S1 = insert_node(N#node { con = connect }, S),
+		    Mon = erlang:monitor(process, SyncPid),
+		    ConMap = S1#s.cons,
+		    ConMap1 = ConMap# { Mon => Addr },
+		    {reply, true, S1#s { cons = ConMap1 }};
+	       true ->
+		    {reply, false, S}
+	    end;
+	N when N#node.state =:= wait ->
+	    S1 = update_node(up, N#node { con=connect, up_tick=tick()}, S),
+	    Mon = erlang:monitor(process, SyncPid),
+	    ConMap = S1#s.cons,
+	    ConMap1 = ConMap# { Mon => Addr },
+	    {reply, true, S1#s { cons = ConMap1 }};
+	_N ->
+	    {reply, false, S}
+    end;
+%% accept connection from Addr?
+handle_call({accept,SyncPid,Addr,_SyncAddr}, _From, S) ->
+    case read_node(Addr, S) of
+	false ->
+	    {reply, false, S};
+	N when N#node.state =:= up ->
+	    if N#node.con =:= none ->
+		    %% node maybe in upq?
+		    S1 = remove_from_upq(N, S),
+		    S2 = insert_node(N#node { con=accept, up_tick=tick() }, S1),
+		    Mon = erlang:monitor(process, SyncPid),
+		    ConMap = S2#s.cons,
+		    ConMap1 = ConMap# { Mon => Addr },
+		    {reply, true, S2#s { cons = ConMap1 }};
+	       true ->
+		    {reply, false, S}
+	    end;
+	N when N#node.state =:= wait ->
+	    %% allow accept side to be in wait state
+	    %% we should regulate this somehow...
+	    S1 = update_node(up, N#node { con = accept }, S),
+	    Mon = erlang:monitor(process, SyncPid),
+	    ConMap = S1#s.cons,
+	    ConMap1 = ConMap# { Mon => Addr },
+	    {reply, true, S1#s { cons = ConMap1 }};
+	_N ->
+	    {reply, false, S}
+    end;
 handle_call({get_state,Addr}, _From, S) ->
-    case find_node(Addr, S#s.nodes) of
+    case read_node(Addr, S) of
 	false ->
 	    {reply, undefined, S};
 	N ->
 	    {reply, N#node.state, S}
     end;
 handle_call(dump, _From, S) ->
+    io:format("oport = ~w\n", [S#s.oport]),
+    io:format("mport = ~w\n", [S#s.mport]),
+    dump_conf(S#s.conf),
+    dump_queue(S),
+    dump_counters(S),
     dump_state(S),
     {reply, ok, S};
 handle_call({send,Mesg}, _From, S) ->
@@ -466,7 +550,7 @@ handle_cast({send,Mesg}, S) ->
     {noreply, S1};
 handle_cast({simping,{IP,Port},IVal}, S) ->
     NAddr = {IP,Port-1},
-    handle_node(NAddr,IVal,S);
+    handle_ping(NAddr,IVal,S);
 handle_cast(_Mesg, S) ->
     ?dbg("nodis: handle_cast: ~p\n", [_Mesg]),
     {noreply, S}.
@@ -490,7 +574,7 @@ handle_info({udp,U,Addr,Port,Data}, S) when S#s.in == U ->
 	    case Data of
 		<<MLen:32, Magic:MLen/binary, IVal:32, _Garbage/binary>> when
 		      Magic =:= (S#s.conf)#conf.magic ->
-		    handle_node(NAddr,IVal,S);
+		    handle_ping(NAddr,IVal,S);
 		_ ->
 		    ?dbg("ignored data from ~s = ~p\n",
 			 [format_addr(NAddr),Data]),
@@ -509,8 +593,38 @@ handle_info(reload, S) ->
 handle_info({'DOWN',Ref,process,_Pid,_Reason}, S) ->
     case maps:take(Ref, S#s.subs) of
 	error ->
-	    {noreply,S};
-	{_S,Subs} ->
+	    case maps:take(Ref,S#s.cons) of
+		error ->
+		    {noreply,S};
+		{Addr,Cons} ->
+		    ?dbg("connection from pid ~p deleted reason=~p",
+			 [_Pid, _Reason]),
+		    case read_node(Addr,S) of
+			false ->
+			    {noreply,S#s { cons=Cons }};
+			N ->
+			    if N#node.state =:= up,
+			       N#node.con =/= none ->
+				    %% auto wait 
+				    notify_subs(S, {wait, N#node.addr}),
+				    Now = tick(),
+				    Dt = case rand:uniform(2) of
+					     1 -> 0;
+					     2 -> 500
+					 end,
+				    S1 = set_node(wait,
+						  N#node { up_tick=Now,
+							   dt_ms = Dt,
+							   con=none,
+							   last_seen=Now}, S),
+				    {noreply,S1#s { cons=Cons}};
+			       true  ->
+				    insert_node(N#node{con=none},S),
+				    {noreply,S#s { cons=Cons }}
+			    end
+		    end
+	    end;
+	{_Sub,Subs} ->
 	    ?dbg("subscription from pid ~p deleted reason=~p",
 		 [_Pid, _Reason]),
 	    {noreply,S#s { subs=Subs }}
@@ -558,10 +672,8 @@ read_conf_(Conf, Map) ->
     PingInterval = maps:get('ping-interval',Map,Conf#conf.ping_interval),
     MaxPingsLost = maps:get('max-pings-lost',Map,Conf#conf.max_pings_lost),
     MinWaitTime  = maps:get('min-wait-time',Map, Conf#conf.min_wait_time),
-    MinDownTime  = maps:get('min-down-time',Map, Conf#conf.min_wait_time),
+    MinDownTime  = maps:get('min-down-time',Map, Conf#conf.min_down_time),
     MaxUpNodes = maps:get('max-up-nodes',Map,Conf#conf.max_up_nodes),
-    MaxPendingNodes = maps:get('max-pending-nodes',Map,
-			       Conf#conf.max_pending_nodes),
     MaxDownNodes = maps:get('max-down-nodes',Map,Conf#conf.max_down_nodes),
     MaxWaitNodes = maps:get('max-wait-nodes',Map,Conf#conf.max_wait_nodes),
     Conf#conf {
@@ -571,7 +683,6 @@ read_conf_(Conf, Map) ->
       min_wait_time = MinWaitTime,
       min_down_time = MinDownTime,
       max_up_nodes = MaxUpNodes,
-      max_pending_nodes = MaxPendingNodes,
       max_down_nodes = MaxDownNodes,
       max_wait_nodes = MaxWaitNodes
      }.
@@ -593,184 +704,267 @@ read_all_env() ->
 	    maps:from_list(application:get_all_env(nodis))
     end.
 
-
+%% start outbound ping timer
 start_ping(Delay) when is_integer(Delay), Delay > 0 ->
     erlang:start_timer(Delay, self(), ping).
 
-handle_node(Addr,IVal,S) ->
-    Nodes = S#s.nodes,
-    case find_node(Addr, Nodes) of
+%% handle incoming node ping
+handle_ping(Addr,IVal,S) ->
+    Now = tick(),
+    case read_node(Addr, S) of
 	false ->
-	    Nodes1 = add_node(Addr, IVal, Nodes, S),
-	    {noreply, S#s { nodes = Nodes1 }};
+	    N = make_node(Addr, IVal, Now),
+	    {noreply,wakeup_node(N, S)};
 	N0 ->
-	    Now = erlang:monotonic_time(),
 	    N = N0#node { last_seen = Now, ival = IVal },
 	    case N#node.state of
 		down ->
 		    DTime = time_diff_ms(Now,N#node.down_tick),
 		    if DTime > (S#s.conf)#conf.min_down_time ->
-			    {noreply, S#s { nodes = handle_down(N, Nodes, Now, S)}};
+			    {noreply,wakeup_node(N, S)};
 		       true ->
-			    {noreply, S#s { nodes = update_node(N, Nodes) }}
+			    {noreply,insert_node(N, S)}
 		    end;
 		wait ->
 		    UTime = time_diff_ms(Now,N#node.up_tick),
-		    if UTime > (S#s.conf)#conf.min_wait_time ->
-			    {noreply, S#s { nodes = handle_wait(N, Nodes, Now, S) }};
+		    MinWaitTime = (S#s.conf)#conf.min_wait_time + N#node.dt_ms,
+		    if UTime > MinWaitTime ->
+			    {noreply,wakeup_node(N, S)};
 		       true ->
-			    {noreply, S#s { nodes = update_node(N, Nodes) }}
+			    {noreply,insert_node(N, S)}
 		    end;
-		pending ->
-		    {noreply, S#s { nodes = handle_pending(N, Nodes, Now, S)}};
 		up ->
-		    {noreply, S#s { nodes = update_node(N, Nodes) }}
+		    {noreply,insert_node(N, S)}
 	    end
     end.
 
-handle_pending(N, Nodes, Now, S) ->
-    Conf = S#s.conf,
-    if map_size(Nodes#nodes.up) < Conf#conf.max_up_nodes ->
-	    notify_subs(S, {up, N#node.addr}),
-	    move_node_up(N, Nodes, Now);
-       true -> %% stay pending
-	    update_node(N, Nodes)
+%% Wakeup a node from down or wait state
+%% if up state counter <= max_up_nodes then send notification
+%% otherwise schedule node for notification
+
+wakeup_node(N, S) ->
+    set_node(up, N#node { up_tick=N#node.last_seen }, S).
+
+read_node(Addr, S) ->
+    case ets:lookup(S#s.tab, Addr) of
+	[] -> false;
+	[N] -> N
     end.
 
-%% node is in down state and we are in refresh_interval  down -> up
-handle_down(N, Nodes, Now, S) ->
-    Conf = S#s.conf,
-    if map_size(Nodes#nodes.pending) =:= 0,
-       map_size(Nodes#nodes.up) < Conf#conf.max_up_nodes ->
-	    notify_subs(S, {up, N#node.addr}),
-	    move_node_up(N, Nodes, Now);
-       map_size(Nodes#nodes.pending) < Conf#conf.max_pending_nodes ->
-	    notify_subs(S, {pending, N#node.addr}),
-	    move_node_pending(N, Nodes);
-       true -> %% stay down
-	    update_node(N, Nodes)
-    end.
+read_counter(State, S) ->
+    [#node_counter{count=Count}] = ets:lookup(S#s.tab, State),
+    Count.
 
-handle_wait(N, Nodes, Now, S) ->
-    Conf = S#s.conf,
-    if map_size(Nodes#nodes.pending) =:= 0,
-       map_size(Nodes#nodes.up) < Conf#conf.max_up_nodes ->
-	    notify_subs(S, {up, N#node.addr}),
-	    move_node_up(N, Nodes, Now);
-       map_size(Nodes#nodes.pending) < Conf#conf.max_pending_nodes ->
-	    notify_subs(S, {pending, N#node.addr}),
-	    move_node_pending(N, Nodes);
+set_node(State, N, S) when N#node.state =/= State ->
+    %% state change
+    case State of
+	wait ->
+	    Counter = read_counter(wait, S),
+	    MaxWaitNodes = (S#s.conf)#conf.max_wait_nodes,
+	    if Counter >= MaxWaitNodes ->
+		    Remove = (Counter+1) - MaxWaitNodes,
+		    remove_oldest(wait,Remove,S);
+	       true ->
+		    ok
+	    end,
+	    S1 = remove_from_upq(N, S),
+	    S2 = update_node(wait, N, S1),
+	    dequeue_from_upq(S2);
+	down ->
+	    Counter = read_counter(down, S),
+	    MaxDownNodes = (S#s.conf)#conf.max_down_nodes, 
+	    if Counter >= MaxDownNodes ->
+		    Remove = (Counter+1) - MaxDownNodes,
+		    remove_oldest(down,Remove,S);
+	       true ->
+		    ok
+	    end,
+	    S1 = remove_from_upq(N, S),
+	    S2 = update_node(down, N, S1),
+	    dequeue_from_upq(S2);
+	up ->
+	    Counter = read_counter(up, S),
+	    Reported = Counter - length(S#s.upq),
+	    if Reported >= (S#s.conf)#conf.max_up_nodes ->
+		    Q = S#s.upq ++ [N#node.addr],
+		    S1 = S#s { upq = Q },
+		    update_node(up, N, S1);
+	       true ->
+		    notify_subs(S, {up, N#node.addr}),
+		    update_node(up, N, S)
+	    end
+    end;
+set_node(_State, N, S) -> %% no state change
+    insert_node(N, S).
+
+%% remove node (address) from upq when changing to wait and down states
+remove_from_upq(N, S) ->
+    Q = lists:delete(N#node.addr, S#s.upq),
+    S#s { upq = Q }.
+
+%% dequeue from upqueue
+dequeue_from_upq(S=#s{upq=[NAddr|Q]}) ->
+    Counter = read_counter(up,S),
+    Reported = Counter - length(S#s.upq),
+    if Reported < (S#s.conf)#conf.max_up_nodes ->
+	    notify_subs(S, {up, NAddr}),
+	    S#s{upq=Q};
        true ->
-	    update_node(N, Nodes)
-    end.
+	    S
+    end;
+dequeue_from_upq(S) ->
+    S.
+		    
+update_node(State, N, S) when  N#node.state =:= undefined ->
+    ets:update_counter(S#s.tab, State, 1),
+    insert_node(N#node{state=State}, S);
+update_node(State, N, S) ->
+    ets:update_counter(S#s.tab, N#node.state, -1),
+    ets:update_counter(S#s.tab, State, 1),
+    insert_node(N#node{state=State}, S).
+
+insert_node(N, S) ->
+    ets:insert(S#s.tab, N),
+    S.
 
 gc_nodes(S) ->
-    Time = erlang:monotonic_time(),
+    Now = tick(),
     MaxPingsLost = (S#s.conf)#conf.max_pings_lost,
-    Nodes = gc_nodes_(S#s.nodes, Time, MaxPingsLost, S),
-    %% io:format("GC nodes (from addr:~w)\n", [S#s.oport]),
-    %% dump_nodes(Nodes, (S#s.conf)#conf.max_pings_lost),
-    S#s{ nodes = Nodes }.
-
-gc_nodes_(Nodes, Now, MaxPingsLost, S) ->
-    %% scan node up and move them to down when not heard from
-    Down0 = [],
-    Down1 = down_nodes(Nodes#nodes.up, Down0, Now, MaxPingsLost, S),
-    Down2 = down_nodes(Nodes#nodes.pending, Down1, Now, MaxPingsLost, S),
-    Down3 = down_nodes(Nodes#nodes.wait, Down2, Now, MaxPingsLost, S),
-    Nodes1 = lists:foldl(
-	       fun(N, Ns) ->
-		       move_node_down(N, Ns, Now, S#s.conf)
-	       end, Nodes, Down3),
-    Nodes2 = up_nodes(Nodes1#nodes.pending, Nodes1, Now, S),
-    wakeup_nodes(Nodes2#nodes.wait, Nodes2, Now, S).
-
-%% nodes that are in pending states shoule wake up and go to up
-up_nodes(PendMap, Nodes, Now, S) ->
-    maps:fold(
-      fun(_Addr, N, Ns) ->
-	      handle_pending(N, Ns, Now, S)
-      end, Nodes, PendMap).
-
-%% nodes that are in wait states shoule wake up and go to pending
-wakeup_nodes(WaitMap, Nodes, Now, S) ->
-    maps:fold(
-      fun(_Addr, N, Ns) ->
-	      UTime = time_diff_ms(Now,N#node.up_tick),
-	      if UTime > (S#s.conf)#conf.min_wait_time ->
-		      handle_wait(N, Ns, Now, S);
+    Down = ets:foldl(
+	     fun(N=#node{}, Acc) ->
+		     LTime = time_diff_us(Now, N#node.last_seen),
+		     if LTime > N#node.ival*MaxPingsLost*1000 ->
+			     [N|Acc];
+			true ->
+			     Acc
+		     end;
+		(#node_counter{}, Acc) -> Acc
+	     end, [], S#s.tab),
+    lists:foldl(
+      fun(N, Si) ->
+	      if N#node.state =/= down ->
+		      notify_subs(Si, {down, N#node.addr});
 		 true ->
-		      Ns
-	      end
-      end, Nodes, WaitMap).
-
-%% Build a list over nodes that are down
-down_nodes(NodeMap, Down, Now, MaxPingsLost, S) ->
-    maps:fold(
-      fun(_Addr, N=#node{last_seen=LastSeen}, Acc) ->
-	      LTime = time_diff_us(Now, LastSeen),
-	      if LTime > N#node.ival*MaxPingsLost*1000 ->
-		      if N#node.state =:= up;
-			 N#node.state =:= pending ->
-			      notify_subs(S, {down, N#node.addr});
-			 true ->
-			      ok
-		      end,
-		      [N#node{down_tick=Now}|Acc];
-		 LTime > N#node.ival*1000 ->
-		      if N#node.state =:= up;
-			 N#node.state =:= pending ->
-			      notify_subs(S, {missed, N#node.addr});
-			 true ->
-			      ok
-		      end,
-		      Acc;
-		 true ->
-		      Acc
-	      end
-      end, Down, NodeMap).
+		      ok
+	      end,
+	      set_node(down, N#node{down_tick=Now}, Si)
+      end, S, Down).
 
 notify_subs(S, Message) ->
+    %% io:format("notify: ~w\n", [Message]),
     maps:fold(
       fun(_Ref,Sub,_Acc) ->
 	      Sub#sub.pid ! {nodis, Sub#sub.ref, Message}
       end, ok, S#s.subs).
 
+dump_conf(C) ->
+    io:format("simulation = ~w\n", [C#conf.simulation]),
+    io:format("hops = ~w\n", [C#conf.hops]),
+    io:format("loop = ~w\n", [C#conf.loop]),
+    io:format("magic = ~w\n", [C#conf.magic]),
+    io:format("ping_delay  = ~w\n", [C#conf.ping_delay]),
+    io:format("ping_interval  = ~w\n", [C#conf.ping_interval]),
+    io:format("max_pings_lost = ~w\n", [C#conf.max_pings_lost]),
+    io:format("min_wait_time = ~w\n", [C#conf.min_wait_time]),
+    io:format("min_down_time = ~w\n", [C#conf.min_down_time]),
+    io:format("max_up_nodes = ~w\n", [C#conf.max_up_nodes]),
+    io:format("max_wait_nodes = ~w\n", [C#conf.max_wait_nodes]),
+    io:format("max_down_nodes = ~w\n", [C#conf.max_down_nodes]).
+    
 dump_state(S) ->
-    dump_nodes(S#s.nodes,(S#s.conf)#conf.max_pings_lost).
+    dump_nodes(S).
 
-dump_nodes(Nodes, MaxPingsLost) ->
-    Time = erlang:monotonic_time(),
-    N0 = 1,
-    N1 = dump_nodes(Nodes#nodes.up, N0, Time, MaxPingsLost),
-    N2 = dump_nodes(Nodes#nodes.pending, N1, Time, MaxPingsLost),
-    N3 = dump_nodes(Nodes#nodes.wait, N2, Time, MaxPingsLost),
-    _N4 = dump_nodes(Nodes#nodes.down, N3, Time, MaxPingsLost),
-    ok.
+dump_counters(S) ->
+    io:format("#up = ~w\n", [read_counter(up, S)]),
+    io:format("#down = ~w\n", [read_counter(down, S)]),
+    io:format("#wait = ~w\n", [read_counter(wait, S)]).
 
-dump_nodes(Map, I0, Now, MaxPingsLost) ->
-    maps:fold(
-      fun(NAddr,N=#node{state=State,first_seen=FT,last_seen=LT},I) ->
-	      UTime = time_diff_us(Now,FT),
-	      LTime = time_diff_us(Now,LT),
+dump_queue(S) ->
+    io:format("queue = ["),
+    case S#s.upq of
+	[] -> 
+	    ok;
+	[A] ->
+	    io:format("~s", [format_addr(A)]);
+	[A|As] ->
+	    io:format("~s", [format_addr(A)]),
+	    lists:foreach(
+	      fun(Ai) ->
+		      io:format(",~s", [format_addr(Ai)])
+	      end, As)
+    end,
+    io:format("]\n").
+
+dump_nodes(S=#s{conf=Conf}) ->
+    Now = tick(),
+    ets:foldl(
+      fun(N=#node{},I) ->
+	      Addr = format_addr(N#node.addr),
+	      Lt = time_diff_us(Now,N#node.last_seen),
 	      LTm = 
-		  if LTime > N#node.ival*MaxPingsLost*1000 ->
-			  dead;
-		     LTime > N#node.ival*1000 ->
+		  if Lt > N#node.ival*Conf#conf.max_pings_lost*1000 ->
+			  down;
+		     Lt > N#node.ival*1000 ->
 			  missed;
 		     true ->
 			  ok
 		  end,
-	      AddrString = format_addr(NAddr),
-	      io:format("~w: state=~w ~s uptime: ~.2fs last: ~.2fs ival=~w ltm=~s\n",
-			[I, State, 
-			 AddrString,
-			 UTime/1000000,
-			 LTime/1000000,
-			 N#node.ival,
-			 LTm]),
-	      I+1
-      end, I0, Map).
+	      case N#node.state of
+		  up ->
+		      Ut = time_diff_us(Now,N#node.up_tick),
+		      io:format("~w: state=~w ~s uptime: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
+				[I, up, Addr,
+				 Ut/1000000,
+				 Lt/1000000,
+				 N#node.ival,
+				 N#node.con,
+				 LTm]);
+		  down ->
+		      if LTm =:= down ->
+			      Dt = time_diff_us(Now,N#node.down_tick),
+			      io:format("~w: state=~w ~s downtime: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
+					[I, down, Addr,
+					 Dt/1000000,
+					 Lt/1000000,
+					 N#node.ival,
+					 N#node.con,
+					 LTm]);
+			 true -> %% ok|missed
+			      Dt_ms = time_diff_ms(Now,N#node.down_tick),
+			      Dt =
+				  if Dt_ms > Conf#conf.min_down_time ->
+					  0;
+				     true ->
+					  Conf#conf.min_down_time - Dt_ms
+				  end,
+			      io:format("~w: state=~w ~s remain: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
+					[I, down, Addr,
+					 Dt/1000,
+					 Lt/1000000,
+					 N#node.ival,
+					 N#node.con,
+					 LTm])
+		      end;
+		  wait ->
+		      Wt_ms = time_diff_ms(Now,N#node.up_tick),
+		      MinWaitTime = Conf#conf.min_wait_time+N#node.dt_ms,
+		      Wt = if Wt_ms > MinWaitTime ->
+				   0;
+			      true ->
+				   MinWaitTime - Wt_ms
+			   end,
+		      io:format("~w: state=~w ~s remain: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
+				[I, wait, Addr,
+				 Wt/1000,
+				 Lt/1000000,
+				 N#node.ival,
+				 N#node.con,
+				 LTm])
+	      end,
+	      I+1;
+	 (#node_counter{}, I) -> 
+	      I
+      end, 1, S#s.tab).
 
 time_diff_ms(A, B) ->
     erlang:convert_time_unit(A - B,native,millisecond).
@@ -961,174 +1155,40 @@ send_message(Data, S) ->
 	    {{error,_Error}, S}
     end.
 
+tick() ->
+    erlang:monotonic_time().
 
-%% find a node: 
--spec find_node(Addr::nodis:node_address(), #nodes{}) ->
-	  false | #node{}.
-
-find_node(Addr, Nodes) ->
-    find_node_(Addr, [Nodes#nodes.up,
-		      Nodes#nodes.pending,
-		      Nodes#nodes.wait,
-		      Nodes#nodes.down]).
-
-find_node_(Addr, [Map|Ms]) ->
-    case maps:find(Addr, Map) of
-	error ->
-	    find_node_(Addr, Ms);
-	{ok,N} ->
-	    N
-    end;
-find_node_(_Addr, []) ->
-    false.
-
--spec take_node(Addr::nodis:node_address(), #nodes{}) ->
-	  false | {#node{}, map()}.
-
-take_node(Addr, Nodes) ->
-    take_node_(Addr, [Nodes#nodes.up,
-		      Nodes#nodes.pending,
-		      Nodes#nodes.wait,
-		      Nodes#nodes.down]).
-
-take_node_(Addr, [Map|Ms]) ->
-    case maps:take(Addr, Map) of
-	error ->
-	    take_node_(Addr, Ms);
-	{N, Map1} ->
-	    {N, Map1}
-    end;
-take_node_(_Addr, []) ->
-    false.
-
-
-%% a node can only be in one state at a time
-
-add_node(Addr, IVal, Nodes = #nodes{ up = Up, pending = Pend }, S) ->
-    Conf = S#s.conf,
-    if map_size(Pend) =:= 0, map_size(Up) < Conf#conf.max_up_nodes ->
-	    add_node_up(Addr, IVal, Nodes, S);
-       map_size(Pend) < Conf#conf.max_pending_nodes -> %% add to pending
-	    ?dbg("add_node: ~s\n", [format_addr(Addr)]),
-	    Now = erlang:monotonic_time(),
-	    notify_subs(S, {pending, Addr}),
-	    Node = make_node(pending, Addr, IVal, Now),
-	    Nodes#nodes { pending = Pend#{ Addr => Node } };
-       true -> %% mark down? so we remember this node?
-	    ?dbg("add_node: ~s no more room dropped\n",
-		 [format_addr(Addr)]),
-	    Nodes
-    end.
-
-%% create node in up state
-add_node_up(Addr, IVal, Nodes = #nodes{ up = Up }, S) ->
-    Node = make_node(up, Addr, IVal, erlang:monotonic_time()),
-    notify_subs(S, {up, Addr}),
-    Nodes#nodes { up = Up#{ Addr => Node } }.
-
-make_node(State, Addr, IVal, Time) ->
+make_node(Addr, IVal, Time) ->
     ?dbg("make_node: ~s ~s\n", [State, format_addr(Addr)]),
-    #node { state = State, addr=Addr, ival=IVal,  
-	    first_seen = Time, last_seen = Time, up_tick = Time }.
+    #node { addr=Addr, ival=IVal, first_seen = Time, 
+	    last_seen = Time, up_tick = Time }.
 
-%% move node to up state, or insert in up state
-move_node_up(Node, Nodes, Now) ->
-    Nodes1 = remove_node(Node, Nodes),
-    Node1 = Node#node { state = up, up_tick = Now },
-    ?dbg("move: ~s:  ~s => ~s\n", 
-	 [format_addr(Node#node.addr),
-	  Node#node.state, Node1#node.state]),
-    insert_node(Node1, Nodes1).
+%% remove the oldest node that is also down 
+remove_oldest(_State,0,S) ->
+    S;
+remove_oldest(State,N,S) ->
+    Ls = get_last_seen(State, S),
+    NR = case length(Ls) of
+	     Len when N < Len -> N;
+	     Len -> Len
+	 end,
+    {LsOld,_} = lists:split(NR,Ls),
+    lists:foreach(
+      fun({_Lt,NState,Addr}) ->
+	      ets:update_counter(S#s.tab, NState, -1),
+	      ets:delete(S#s.tab, Addr)
+      end, LsOld),
+    S.
 
-%% move node to pending state, or insert in pending state
-move_node_pending(Node, Nodes) ->
-    Nodes1 = remove_node(Node, Nodes),
-    Node1 = Node#node { state = pending },
-    ?dbg("move: ~s:  ~s => ~s\n", 
-	 [format_addr(Node#node.addr),
-	  Node#node.state, Node1#node.state]),
-    insert_node(Node1, Nodes1).
 
-%% move node to down state
-move_node_down(Node, Nodes, Now, Conf) ->
-    Nodes1 = remove_node(Node, Nodes),
-    Node1 = Node#node { state = down, down_tick = Now },
-    ?dbg("move: ~s:  ~s => ~s\n", 
-	 [format_addr(Node1#node.addr), Node#node.state, Node1#node.state]),
-    Nodes2 = if map_size(Nodes1#nodes.down) >= Conf#conf.max_down_nodes ->
-		     Nodes1#nodes {down = remove_oldest_node(Nodes#nodes.down) };
-		true ->
-		     Nodes1
-	     end,
-    insert_node(Node1, Nodes2).
-
-%% move node to wait state
-move_node_wait(Node, Nodes, Now) ->
-    Nodes1 = remove_node(Node, Nodes),
-    Node1 = Node#node { state = wait, up_tick=Now },
-    ?dbg("move: ~s:  ~s => ~s\n", 
-	 [format_addr(Node#node.addr),
-	  Node#node.state, Node1#node.state]),
-    insert_node(Node1, Nodes1).
-
--spec update_node(Node::#node{}, Nodes::#nodes{}) -> #nodes{}.
-
-update_node(Node, Nodes) ->
-    Nodes1 = remove_node(Node, Nodes),
-    NodeMap = get_node_map(Node#node.state, Nodes1),
-    insert_node_(Node, NodeMap, Nodes1).
-
--spec remove_node(Node::#node{}, Nodes::#nodes{}) -> #nodes{}.
-
-remove_node(Node, Nodes) ->
-    NodeMap = get_node_map(Node#node.state, Nodes),
-    NodeMap1 = maps:remove(Node#node.addr, NodeMap),
-    set_node_map(Node#node.state, NodeMap1, Nodes).
-
--spec insert_node(Node::#node{}, Nodes::#nodes{}) -> #nodes{}.
-
-insert_node(Node, Nodes) ->
-    NodeMap = get_node_map(Node#node.state, Nodes),
-    insert_node_(Node, NodeMap, Nodes).
-
-insert_node_(Node, NodeMap, Nodes) ->
-    Addr = Node#node.addr,
-    NodeMap1 = NodeMap#{ Addr => Node },
-    set_node_map(Node#node.state, NodeMap1, Nodes).
-
-get_node_map(State, Nodes) ->
-    case State of
-	up -> Nodes#nodes.up;
-	pending -> Nodes#nodes.pending;
-	wait -> Nodes#nodes.wait;
-	down -> Nodes#nodes.down
-    end.    
-
-set_node_map(State, Map, Nodes) ->
-    case State of
-	up      -> Nodes#nodes { up = Map };
-	pending -> Nodes#nodes { pending = Map };
-	wait    -> Nodes#nodes { wait = Map };
-	down    -> Nodes#nodes { down = Map }
-    end.
-
-remove_oldest_node(Map) ->
-    case find_oldest_node(Map) of
-	{undefined,undefined} ->
-	    Map;
-	{Addr,_Time} ->
-	    maps:remove(Addr, Map)
-    end.
-
-%% find the oldest entry in the map 
-find_oldest_node(Map) ->
-    maps:fold(
-      fun(Addr, Node, {undefined,undefined}) ->
-	      {Addr,Node#node.last_seen};
-	 (Addr, Node, Old={_OldAddr,OldTime}) ->
-	      if Node#node.last_seen < OldTime ->
-		      {Addr,Node#node.last_seen};
-		 true ->
-		      Old
-	      end
-      end, {undefined,undefined}, Map).
+%% get neighbours in state State sort by last_seen
+get_last_seen(State, S) ->
+    Ls = 
+	ets:foldl(
+	  fun(N, Acc) when 
+		    ((N#node.state =:= State) orelse (State =:= undefined)) ->
+		  [{N#node.last_seen,N#node.state,N#node.addr}|Acc];
+	     (_N, Acc) ->
+		  Acc
+	  end, [], S#s.tab),
+    lists:keysort(1, Ls).

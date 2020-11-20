@@ -24,13 +24,14 @@ also shutdown to get down messages.
 
 ## States
 
-The neigbour nodes to nodis can have state **up**, **down**, **pending** or **wait**.
+The neigbour nodes to nodis can have state **up**, **down** or **wait**.
 The state diagram looks like follow:
 
-    up -> wait | down
-    pending -> up | down
-    wait -> down | pending
-    down -> pending 
+	up -> up(connect) | up(accept) | down
+    up(connect) -> wait | down
+    up(accept) -> wait | down
+    wait -> down | up
+    down -> up
 
 The number of neighbours that can be in any of the state are controlled
 by the following configurables
@@ -40,12 +41,6 @@ by the following configurables
  A node stays in up state until it has been served
  and marked as waiting (using **nodis:wait(Addr)**) or if node stops 
  pinging and is  marked as **down**
-
-* max-pending-nodes (100)
-
- A node will be pending and queued until 
- there is a slot among nodes in up state,
- that is when node_count(up) < max-up-nodes
 
 * max-wait-nodes ( 1000 )
 

@@ -41,12 +41,6 @@ get() ->
 		    "this limits the amount of parallel encryption work "
 		    "that needs to be running at any given moment.",
 		    typical = 10 }},
-       {'max-pending-nodes',
-	#json_type {name = {integer,1,10000},
-		    info = "Max number of nodes that are waiting to connect "
-		    "and exchange messages, the nodes are served in first "
-		    "come first serv fashion.",
-		    typical = 100 }},
        {'max-wait-nodes',
 	#json_type {name = {integer,1,10000},
 		    info = "Max number of nodes that have been up, and are "

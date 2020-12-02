@@ -249,21 +249,21 @@ wait(Pid,Addr) ->
     gen_server:call(Pid, {wait,Addr}).
 
 
--spec connect(Addr::nodis:addr(),SyncAddr::nodis:addr()) -> ok.
+-spec connect(Addr::nodis:addr(),SyncAddr::nodis:addr()) -> boolean().
 connect(Addr,SyncAddr) ->
     gen_server:call(?SERVER, {connect,self(),Addr,SyncAddr}).
 
 -spec connect(Pid::pid(),Addr::nodis:addr(),
-	      SyncAddr::nodis:addr()) -> ok.
+	      SyncAddr::nodis:addr()) -> boolean().
 
 connect(Pid,Addr,SyncAddr) ->
     gen_server:call(Pid, {connect,self(),Addr,SyncAddr}).
 
--spec accept(Addr::nodis:addr(),SyncAddr::nods:addr()) -> ok.
+-spec accept(Addr::nodis:addr(),SyncAddr::nods:addr()) -> boolean().
 accept(Addr,SyncAddr) ->
     gen_server:call(?SERVER, {accept,self(),Addr,SyncAddr}).
 
--spec accept(Pid::pid(),Addr::nods:addr(),SyncAddr::nods:addr()) -> ok.
+-spec accept(Pid::pid(),Addr::nods:addr(),SyncAddr::nods:addr()) -> boolean().
 
 accept(Pid,Addr,SyncAddr) ->
     gen_server:call(Pid, {accept,self(),Addr,SyncAddr}).

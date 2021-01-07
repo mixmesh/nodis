@@ -17,11 +17,15 @@ get() ->
       [{'ping-delay',
 	#json_type{name = {integer,50,1000000},
 		   info = "Time in ms until first ping",
-		   typical = 1000 }},
+		   typical = 1000,
+                   transform = fun simulator_scaling/1,
+                   untransform = fun simulator_unscaling/1}},
        {'ping-interval',
 	#json_type{name = {integer,50,1000000},
 		   info = "Interval in ms between multicast pings",
-		   typical = 5000 }},
+		   typical = 5000,
+                   transform = fun simulator_scaling/1,
+                   untransform = fun simulator_unscaling/1}},
        {'max-pings-lost',
 	#json_type{name = {integer,1,1000},
 		   info = "Number of pings missing before nodes are regarded "
@@ -30,11 +34,15 @@ get() ->
        {'min-wait-time',
 	#json_type{name = {integer,50,1000000},
 		   info = "Minimum time to wait before a node can be up again.",
-		   typical = 300000 }}, %% 5 min
+		   typical = 300000,
+                   transform = fun simulator_scaling/1,
+                   untransform = fun simulator_unscaling/1 }}, %% 5 min
        {'min-down-time',
 	#json_type{name = {integer,50,1000000},
 		   info = "Minimum time to wait before a failed node is allowed back.",
-		   typical = 600000 }}, %% 10 min
+		   typical = 600000,
+                   transform = fun simulator_scaling/1,
+                   untransform = fun simulator_unscaling/1 }}, %% 10 min
        {'max-up-nodes',
 	#json_type {name = {integer,1,10000},
 		    info = "Max number of nodes that can be in state up,"
@@ -54,3 +62,23 @@ get() ->
 		    typical = 2000 }}
       ]
      }].
+
+simulator_scaling(Value) ->
+    SimulatorScaleFactor =
+        case os:getenv("SCALEFACTOR") of
+            false ->
+                1;
+            ScaleFactorString ->
+                ?l2i(ScaleFactorString)
+        end,
+    round(Value / SimulatorScaleFactor).
+
+simulator_unscaling(Value) ->
+    SimulatorScaleFactor =
+        case os:getenv("SCALEFACTOR") of
+            false ->
+                1;
+            ScaleFactorString ->
+                ?l2i(ScaleFactorString)
+        end,
+    round(Value * SimulatorScaleFactor).

@@ -156,7 +156,7 @@
 -define(NODIS_MAGIC, <<"ERLGAMAL">>).
 -define(NODIS_MULTICAST_ADDR4, {224,0,0,1}).
 -define(NODIS_MULTICAST_ADDR6, {16#FF12,0,0,0,0,0,0,1234}).
--define(NODIS_DEFAULT_UDP_PORT, 9900).  %% match obscrete sync port
+-define(NODIS_DEFAULT_UDP_PORT, 9900).  %% match mixmesh sync port
 
 -define(NODIS_MULTICAST_IF4,  ?ANY4).
 -define(NODIS_MULTICAST_IF6,  ?ANY6).

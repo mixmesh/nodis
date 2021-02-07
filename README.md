@@ -54,3 +54,14 @@ by the following configurables
  in a down state. Nodes may in down state must wait at least **min-down-time** 
  ms before it can be activated again, put on pending list.
 
+
+# Nodis ping header
+
+Nodis send a ping keep alive header every ping-interval (ms) with 
+the following information
+
+	   <<Magic:16/binary, Features:32, NodeID:32/binary,
+	     IVal:32, CacheTimeout:32,
+	     Lat:32/float, Long:32/float, Spd:32/float,
+	     DeltaLat:32/float, DeltaLong:32/float,
+	     DestLat:32/float, DestLong:32/float>>

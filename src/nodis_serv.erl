@@ -19,6 +19,9 @@
 -export([connect/2, connect/3]).
 -export([accept/2, accept/3]).
 -export([get_state/1, get_state/2]).
+-export([get_location/1, get_location/2]).
+-export([get_node_location/0, get_node_location/1]).
+-export([set_node_location/1, set_node_location/2]).
 
 %% test
 -export([send/1, send/2]).
@@ -46,6 +49,7 @@
 -type time_ms() :: non_neg_integer().
 -type tick()    :: integer().
 -type timer()   :: reference().
+-type uint32()  :: 0..16#ffffffff.
 
 %% subscriber for node events
 -record(sub,
@@ -60,10 +64,45 @@
 	 count = 0
 	}).
 
+%% Ping Header defaults
+-define(NODIS_MAGIC, <<"MIXMESH">>).
+-define(NODIS_FEATURES,   16#00000000).
+-define(NODIS_LAT,        0.0).
+-define(NODIS_LONG,       0.0).
+-define(NODIS_SPD,        0.0).
+-define(NODIS_DELTA_LAT,  0.0).
+-define(NODIS_DELTA_LONG, 0.0).
+%% forwarding location
+-define(NODIS_DEST_LAT,   0).
+-define(NODIS_DEST_LONG,  0).
+-define(NODIS_CACHE_TIMEOUT, 3600).  %% 1hour timeout
+
+-define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
+
+-record(node_info,
+	{
+	 %% temporary node id (valid cache_timeout seconds)
+	 nodeid :: <<_:(32*8)>>,
+	 %% after that send with this interval
+	 ping_interval = ?NODIS_DEFAULT_PING_INTERVAL :: time_ms(),
+	 %% supported features
+	 features = ?NODIS_FEATURES  :: uint32(),
+	 %% 
+	 cache_timeout = ?NODIS_CACHE_TIMEOUT :: uint32(),
+	 lat  = ?NODIS_LAT  :: float(),
+	 long = ?NODIS_LONG :: float(),
+	 spd  = ?NODIS_SPD :: float(),
+	 delta_lat  = ?NODIS_DELTA_LAT ::float(),
+	 delta_long = ?NODIS_DELTA_LONG :: float(),
+	 dest_lat  = ?NODIS_DEST_LAT :: float(),
+	 dest_long = ?NODIS_DEST_LONG :: float()
+	}).
+
 -record(node,
 	{
 	 addr :: nodis:addr(),  %% ip address of node (keypos=2)
 	 state :: nodis:node_state(),
+	 info  :: #node_info{},
 	 con = none  :: none | connect | accept,
 	 dt_ms = 0 :: time_ms(),  %% added to wait time / down time
 	 ival  :: time_ms(),     %% node announce to send this often in ms
@@ -80,7 +119,6 @@
 	   ifindex_t() => [inet:ip_address()] }.
 
 -define(NODIS_DEFAULT_PING_DELAY, 1000). %% 1s before first ping
--define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
 -define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
 -define(NODIS_DEFAULT_MIN_WAIT_TIME, 30000). %% test 30seconds
 -define(NODIS_DEFAULT_MIN_DOWN_TIME, 60000). %% test 30seconds
@@ -90,17 +128,24 @@
 -define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
 -define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
 
+%% 2-bits for node size 
+-define(NODIS_FEATURE_TINY,    16#00000000).
+-define(NODIS_FEATURE_SMALL,   16#00000001).
+-define(NODIS_FEATURE_MEDIUM,  16#00000002).
+-define(NODIS_FEATURE_HUGE,    16#00000003).
+%% pure static node (ignore speed and delta)
+-define(NODIS_FEATURE_STATIC,  16#00000010).
+
 -record(conf,
 	{
 	 input = #{} :: nodis_option(), %% input options (override!)
 	 simulation = false :: boolean(),
 	 hops :: non_neg_integer(),   %% max number of hops (ttl)
 	 loop :: boolean(),           %% loop on host (other applications)
-	 magic :: binary(),           %% magic ping
+	 magic :: <<_:(16*8)>>,         %% magic ping (zero padded to 16 bytes)
+	 info  :: #node_info{},       %% own node info
 	 %% delay until first ping
 	 ping_delay = ?NODIS_DEFAULT_PING_DELAY :: time_ms(),
-	 %% after that send with this interval
-	 ping_interval = ?NODIS_DEFAULT_PING_INTERVAL :: time_ms(),
 	 %% down if we missed this number of pings
 	 max_pings_lost = ?NODIS_DEFAULT_MAX_PINGS_LOST :: non_neg_integer(),
 	 %% resend up after min_wait_time
@@ -153,7 +198,7 @@
 -define(ANY4, {0,0,0,0}).
 -define(ANY6, {0,0,0,0,0,0,0,0}).
 
--define(NODIS_MAGIC, <<"ERLGAMAL">>).
+
 -define(NODIS_MULTICAST_ADDR4, {224,0,0,1}).
 -define(NODIS_MULTICAST_ADDR6, {16#FF12,0,0,0,0,0,0,1234}).
 -define(NODIS_DEFAULT_UDP_PORT, 9900).  %% match mixmesh sync port
@@ -259,24 +304,55 @@ connect(Addr,SyncAddr) ->
 connect(Pid,Addr,SyncAddr) ->
     gen_server:call(Pid, {connect,self(),Addr,SyncAddr}).
 
--spec accept(Addr::nodis:addr(),SyncAddr::nods:addr()) -> boolean().
+-spec accept(Addr::nodis:addr(),SyncAddr::nodis:addr()) -> boolean().
 accept(Addr,SyncAddr) ->
     gen_server:call(?SERVER, {accept,self(),Addr,SyncAddr}).
 
--spec accept(Pid::pid(),Addr::nods:addr(),SyncAddr::nods:addr()) -> boolean().
+-spec accept(Pid::pid(),Addr::nodis:addr(),SyncAddr::nodis:addr()) -> boolean().
 
 accept(Pid,Addr,SyncAddr) ->
     gen_server:call(Pid, {accept,self(),Addr,SyncAddr}).
 
 %% Get neighbour state
--spec get_state(Addr::nods:addr()) -> nodis:node_state().
+-spec get_state(Addr::nodis:addr()) -> nodis:node_state().
 get_state(Addr) ->
     gen_server:call(?SERVER, {get_state,Addr}).
 
 %% Get neighbour state
--spec get_state(Pid::pid(), Addr::nods:addr()) -> nodis:node_state().
+-spec get_state(Pid::pid(), Addr::nodis:addr()) -> nodis:node_state().
 get_state(Pid,Addr) ->
     gen_server:call(Pid, {get_state,Addr}).
+
+%% Get neighbour location info
+-spec get_location(Addr::nodis:addr()) -> nodis:location().
+get_location(Addr) ->
+    gen_server:call(?SERVER, {get_location,Addr}).
+
+%% Get neighbour location info
+-spec get_location(Pid::pid(), Addr::nodis:addr()) -> nodis:location().
+get_location(Pid,Addr) ->
+    gen_server:call(Pid, {get_location,Addr}).
+
+%% Get own location info
+-spec get_node_location() -> nodis:location().
+get_node_location() ->
+    gen_server:call(?SERVER, get_node_location).
+
+%% Get neighbour location info
+-spec get_node_location(Pid::pid()) -> nodis:location().
+get_node_location(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, get_node_location).
+
+%% Set own location info
+-spec set_node_location(Addr::nodis:location()) -> nodis:location().
+set_node_location(Location) when is_map(Location) ->
+    gen_server:call(?SERVER, {set_node_location,Location}).
+
+%% Get neighbour location info
+-spec set_node_location(Pid::pid(), Location::nodis:location()) -> 
+	  nodis:location().
+set_node_location(Pid,Location) when is_pid(Pid), is_map(Location) ->
+    gen_server:call(Pid, {set_node_location,Location}).
 
 %% test - broadcast any message
 send(Data) ->
@@ -289,16 +365,21 @@ send(Pid, Data) ->
 %% {up, Addr} | {missed, Addr} | {down, Addr}
 %% NOT {wait,Addr} we must handle this from application
 %%
-simping(Pid, {A,B,C,D}, Port, IVal) when
+simping(Pid, Addr, Port, IVal) when is_integer(IVal) ->
+    simping_(Pid, Addr, Port, #{ ping_interval => IVal});
+simping(Pid, Addr, Port, Opts) when is_list(Opts) ->
+    simping_(Pid, Addr, Port, maps:from_list(Opts));
+simping(Pid, Addr, Port, Opts) when is_map(Opts) ->
+    simping_(Pid, Addr, Port, Opts).
+
+simping_(Pid, {A,B,C,D}, Port, Opts) when
       (A bor B bor C bor D) band (bnot 16#ff) =:= 0,
-      is_integer(Port),
-      is_integer(IVal) ->
-    gen_server:cast(Pid, {simping,{{A,B,C,D},Port},IVal});
-simping(Pid, {A,B,C,D,E,F,G,H}, Port, IVal) when
+      is_integer(Port) ->
+    gen_server:cast(Pid, {simping,{{A,B,C,D},Port},Opts});
+simping_(Pid, {A,B,C,D,E,F,G,H}, Port, Opts) when
       (A bor B bor C bor D bor E bor F bor G bor H) band (bnot 16#ffff) =:= 0,
-      is_integer(Port),
-      is_integer(IVal) ->
-    gen_server:cast(Pid, {simping,{{A,B,C,D,E,F,G,H},Port},IVal}).
+      is_integer(Port) ->
+    gen_server:cast(Pid, {simping,{{A,B,C,D,E,F,G,H},Port},Opts}).
 
 %% util
 select_any(inet) -> ?ANY4;
@@ -342,12 +423,17 @@ init([InputOpts]) ->
 		    false -> false;
 		    _ -> true
 		end,
+    NodeID = crypto:strong_rand_bytes(32),
+    %% NodeID = crypto:hash(sha256, ipv6-address + time)
+    NodeInfo = #node_info { nodeid = NodeID },
     Conf0 = #conf {
 	       input  = InputOpts,  %% keep override options
 	       simulation = Simulation orelse Simulator,
 	       hops  = Mhops,
 	       loop  = Mloop,
-	       magic = Magic },
+	       magic = zero_pad(Magic, 16),
+	       info  = NodeInfo
+	      },
     Conf = read_conf(Conf0, Opts),
 
     case Simulation of
@@ -523,6 +609,45 @@ handle_call({get_state,Addr}, _From, S) ->
 	N ->
 	    {reply, N#node.state, S}
     end;
+handle_call({get_location,Addr}, _From, S) ->
+    case read_node(Addr, S) of
+	false ->
+	    {reply, undefined, S};
+	N ->
+	    Info = N#node.info,
+	    Location = #{ lat => Info#node_info.lat,
+			  long => Info#node_info.long,
+			  spd => Info#node_info.spd,
+			  delta_lat => Info#node_info.delta_lat,
+			  delta_long => Info#node_info.delta_long,
+			  dest_lat   => Info#node_info.dest_lat,
+			  dest_long  => Info#node_info.dest_long },
+	    {reply, Location, S}
+    end;
+handle_call(get_node_location, _From, S) ->
+    Info = (S#s.conf)#conf.info,
+    Location = #{ lat => Info#node_info.lat,
+		  long => Info#node_info.long,
+		  spd => Info#node_info.spd,
+		  delta_lat => Info#node_info.delta_lat,
+		  delta_long => Info#node_info.delta_long,
+		  dest_lat   => Info#node_info.dest_lat,
+		  dest_long  => Info#node_info.dest_long },
+    {reply, Location, S};
+
+handle_call({set_node_location, L}, _From, S) ->
+    Conf = S#s.conf,
+    I = Conf#conf.info,
+    J =
+	I#node_info { lat=maps:get(lat,L,I#node_info.lat),
+		      long=maps:get(long,L,I#node_info.long),
+		      spd=maps:get(spd,L,I#node_info.spd),
+		      delta_lat=maps:get(delta_lat,L,I#node_info.delta_lat),
+		      delta_long=maps:get(delta_long,L,I#node_info.delta_long),
+		      dest_lat=maps:get(dest_lat,L,I#node_info.dest_lat),
+		      dest_long=maps:get(dest_long,L,I#node_info.dest_long) },
+    {reply, ok, S#s { conf = Conf#conf { info = J }}};
+
 handle_call(dump, _From, S) ->
     io:format("oport = ~w\n", [S#s.oport]),
     io:format("mport = ~w\n", [S#s.mport]),
@@ -548,9 +673,24 @@ handle_call(_Request, _From, S) ->
 handle_cast({send,Mesg}, S) ->
     {_, S1} = send_message(Mesg, S),
     {noreply, S1};
-handle_cast({simping,{IP,Port},IVal}, S) ->
+handle_cast({simping,{IP,Port},Opts}, S) ->
     NAddr = {IP,Port-1},
-    handle_ping(NAddr,IVal,S);
+    IVal = maps:get(ping_interval, Opts),
+    Lat  = maps:get(lat, Opts, 0.0),
+    Long = maps:get(long, Opts, 0.0),
+    Spd  = maps:get(spd, Opts, 0.0),
+    DLat  = maps:get(delta_lat, Opts, 0.0),
+    DLong = maps:get(delta_long, Opts, 0.0),
+    DestLat  = maps:get(dest_lat, Opts, 0.0),
+    DestLong = maps:get(dest_long, Opts, 0.0),
+    NodeID = crypto:hash(sha256, term_to_binary({IP,Port})),
+    NodeInfo = #node_info { nodeid = NodeID,
+			    ping_interval = IVal,
+			    lat = Lat, long = Long, spd = Spd,
+			    delta_lat = DLat, delta_long = DLong,
+			    dest_lat = DestLat, dest_long = DestLong
+			  },
+    handle_ping(NAddr,NodeInfo,S);
 handle_cast(_Mesg, S) ->
     ?dbg("nodis: handle_cast: ~p\n", [_Mesg]),
     {noreply, S}.
@@ -571,19 +711,19 @@ handle_info({udp,U,Addr,Port,Data}, S) when S#s.in == U ->
 	    {noreply, S};
        true ->
 	    NAddr = {Addr,Port-1},
-	    case Data of
-		<<MLen:32, Magic:MLen/binary, IVal:32, _Garbage/binary>> when
-		      Magic =:= (S#s.conf)#conf.magic ->
-		    handle_ping(NAddr,IVal,S);
-		_ ->
+	    case get_header(S#s.conf, Data) of
+		false ->
 		    ?dbg("ignored data from ~s = ~p\n",
 			 [format_addr(NAddr),Data]),
-		    {noreply, S}
+		    {noreply, S};
+		NodeInfo ->
+		    handle_ping(NAddr,NodeInfo,S)
 	    end
     end;
 handle_info({timeout,Tmr,ping}, S) when Tmr =:= S#s.ping_tmr ->
     send_ping(S),
-    PingTmr = start_ping((S#s.conf)#conf.ping_interval),
+    PingInterval = ((S#s.conf)#conf.info)#node_info.ping_interval,
+		    PingTmr = start_ping(PingInterval),
     S1 = gc_nodes(S),
     {noreply, S1#s { ping_tmr = PingTmr }};
 handle_info(reload, S) ->
@@ -668,16 +808,18 @@ read_conf(Conf, InputOpts) ->
     read_conf_(Conf, read_options(InputOpts)).
 
 read_conf_(Conf, Map) ->
+    PingInterval0 = get_ping_interval(Conf),
     PingDelay = maps:get('ping-delay',Map,Conf#conf.ping_delay),
-    PingInterval = maps:get('ping-interval',Map,Conf#conf.ping_interval),
+    PingInterval = maps:get('ping-interval',Map,PingInterval0),
     MaxPingsLost = maps:get('max-pings-lost',Map,Conf#conf.max_pings_lost),
     MinWaitTime  = maps:get('min-wait-time',Map, Conf#conf.min_wait_time),
     MinDownTime  = maps:get('min-down-time',Map, Conf#conf.min_down_time),
     MaxUpNodes = maps:get('max-up-nodes',Map,Conf#conf.max_up_nodes),
     MaxDownNodes = maps:get('max-down-nodes',Map,Conf#conf.max_down_nodes),
     MaxWaitNodes = maps:get('max-wait-nodes',Map,Conf#conf.max_wait_nodes),
+    Info = set_ping_interval(Conf#conf.info, PingInterval),
     Conf#conf {
-      ping_interval = PingInterval,
+      info = Info,
       ping_delay = PingDelay,
       max_pings_lost = MaxPingsLost,
       min_wait_time = MinWaitTime,
@@ -686,6 +828,12 @@ read_conf_(Conf, Map) ->
       max_down_nodes = MaxDownNodes,
       max_wait_nodes = MaxWaitNodes
      }.
+
+get_ping_interval(#conf{info=NodeInfo}) ->
+    NodeInfo#node_info.ping_interval.
+
+set_ping_interval(NodeInfo = #node_info {}, IVal) ->
+    NodeInfo#node_info { ping_interval = IVal }.
 
 %% input options override environment options
 read_options(InputOpts) ->
@@ -709,14 +857,15 @@ start_ping(Delay) when is_integer(Delay), Delay > 0 ->
     erlang:start_timer(Delay, self(), ping).
 
 %% handle incoming node ping
-handle_ping(Addr,IVal,S) ->
+handle_ping(Addr,NodeInfo,S) ->
     Now = tick(),
     case read_node(Addr, S) of
 	false ->
-	    N = make_node(Addr, IVal, Now),
+	    N = make_node(Addr, NodeInfo, Now),
 	    {noreply,wakeup_node(N, S)};
 	N0 ->
-	    N = N0#node { last_seen = Now, ival = IVal },
+	    IVal = NodeInfo#node_info.ping_interval,
+	    N = N0#node { last_seen = Now, info = NodeInfo, ival = IVal },
 	    case N#node.state of
 		down ->
 		    DTime = time_diff_ms(Now,N#node.down_tick),
@@ -861,15 +1010,19 @@ dump_conf(C) ->
     io:format("simulation = ~w\n", [C#conf.simulation]),
     io:format("hops = ~w\n", [C#conf.hops]),
     io:format("loop = ~w\n", [C#conf.loop]),
-    io:format("magic = ~w\n", [C#conf.magic]),
+    io:format("magic = ~p\n", [cstring(C#conf.magic)]),
+    io:format("ping_interval  = ~w\n", [get_ping_interval(C)]),
     io:format("ping_delay  = ~w\n", [C#conf.ping_delay]),
-    io:format("ping_interval  = ~w\n", [C#conf.ping_interval]),
     io:format("max_pings_lost = ~w\n", [C#conf.max_pings_lost]),
     io:format("min_wait_time = ~w\n", [C#conf.min_wait_time]),
     io:format("min_down_time = ~w\n", [C#conf.min_down_time]),
     io:format("max_up_nodes = ~w\n", [C#conf.max_up_nodes]),
     io:format("max_wait_nodes = ~w\n", [C#conf.max_wait_nodes]),
     io:format("max_down_nodes = ~w\n", [C#conf.max_down_nodes]).
+
+cstring(<<0,_/binary>>) -> [];
+cstring(<<>>) -> [];
+cstring(<<C,Cs/binary>>) -> [C | cstring(Cs)].
     
 dump_state(S) ->
     dump_nodes(S).
@@ -909,26 +1062,18 @@ dump_nodes(S=#s{conf=Conf}) ->
 		     true ->
 			  ok
 		  end,
+	      Info = N#node.info,
 	      case N#node.state of
 		  up ->
 		      Ut = time_diff_us(Now,N#node.up_tick),
-		      io:format("~w: state=~w ~s uptime: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
-				[I, up, Addr,
-				 Ut/1000000,
-				 Lt/1000000,
-				 N#node.ival,
-				 N#node.con,
-				 LTm]);
+		      format_node(I,up,Addr,
+				  uptime,Ut,Lt,N,LTm,Info);
 		  down ->
 		      if LTm =:= down ->
 			      Dt = time_diff_us(Now,N#node.down_tick),
-			      io:format("~w: state=~w ~s downtime: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
-					[I, down, Addr,
-					 Dt/1000000,
-					 Lt/1000000,
-					 N#node.ival,
-					 N#node.con,
-					 LTm]);
+			      format_node(I,down,Addr,
+					  downtime,Dt,
+					  Lt, N, LTm, Info);
 			 true -> %% ok|missed
 			      Dt_ms = time_diff_ms(Now,N#node.down_tick),
 			      Dt =
@@ -937,13 +1082,9 @@ dump_nodes(S=#s{conf=Conf}) ->
 				     true ->
 					  Conf#conf.min_down_time - Dt_ms
 				  end,
-			      io:format("~w: state=~w ~s remain: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
-					[I, down, Addr,
-					 Dt/1000,
-					 Lt/1000000,
-					 N#node.ival,
-					 N#node.con,
-					 LTm])
+			      format_node(I,wait,Addr,
+					  remain,Dt*1000,
+					  Lt,N,LTm,Info)
 		      end;
 		  wait ->
 		      Wt_ms = time_diff_ms(Now,N#node.up_tick),
@@ -953,18 +1094,26 @@ dump_nodes(S=#s{conf=Conf}) ->
 			      true ->
 				   MinWaitTime - Wt_ms
 			   end,
-		      io:format("~w: state=~w ~s remain: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s\n",
-				[I, wait, Addr,
-				 Wt/1000,
-				 Lt/1000000,
-				 N#node.ival,
-				 N#node.con,
-				 LTm])
+		      format_node(I,wait,Addr,
+				  remain,Wt*1000,Lt,N,LTm,Info)
 	      end,
 	      I+1;
 	 (#node_counter{}, I) -> 
 	      I
       end, 1, S#s.tab).
+
+format_node(I,State, Addr,TimeType,Time, Lt, Node, LTm, Info) ->
+    io:format("~w: state=~w ~s ~s: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s, lat=~.4f, long=~.4f, spd=~.4f\n",
+	      [I, State, Addr,
+	       TimeType, Time/1000000,
+	       Lt/1000000,
+	       Info#node_info.ping_interval, %% == Node#node.ival
+	       Node#node.con,
+	       LTm,
+	       Info#node_info.lat,
+	       Info#node_info.long,
+	       Info#node_info.spd
+	      ]).
 
 time_diff_ms(A, B) ->
     erlang:convert_time_unit(A - B,native,millisecond).
@@ -1137,11 +1286,7 @@ send_ping(S) ->
     if Conf#conf.simulation ->
 	    {ok,S};
        true ->
-	    %% multicast magic + ping_interval
-	    Magic = Conf#conf.magic,
-	    IVal  = Conf#conf.ping_interval,
-	    Ping  = <<(byte_size(Magic)):32, Magic/binary,  IVal:32>>,
-	    send_message(Ping, S)
+	    send_message(make_header(Conf), S)
     end.
 
 send_message(Data, S) ->
@@ -1155,12 +1300,44 @@ send_message(Data, S) ->
 	    {{error,_Error}, S}
     end.
 
+get_header(#conf{ magic=Magic },
+	   <<Magic:16/binary, Features:32, NodeID:32/binary,
+	     IVal:32, CacheTimeout:32,
+	     Lat:32/float, Long:32/float, Spd:32/float,
+	     DLat:32/float, DLong:32/float,
+	     DestLat:32/float, DestLong:32/float, _/binary>>) ->
+    #node_info { ping_interval = IVal,
+		 nodeid = NodeID,
+		 features=Features,
+		 lat=Lat, long=Long, spd=Spd,
+		 delta_lat=DLat,delta_long=DLong,
+		 dest_lat=DestLat,dest_long=DestLong,
+		 cache_timeout=CacheTimeout };
+get_header(_Conf, _Data) -> %% No match
+    false.
+
+make_header(#conf{ magic=Magic,
+		   info = #node_info {
+			     nodeid=NodeID,
+			     ping_interval=IVal,
+			     features=Features,
+			     lat=Lat, long=Long, spd=Spd,
+			     delta_lat=DeltaLat,delta_long=DeltaLong,
+			     dest_lat=DestLat,dest_long=DestLong,
+			     cache_timeout=CacheTimeout}}) ->
+    <<Magic:16/binary, Features:32, NodeID:32/binary,
+      IVal:32, CacheTimeout:32,
+      Lat:32/float, Long:32/float, Spd:32/float,
+      DeltaLat:32/float, DeltaLong:32/float,
+      DestLat:32/float, DestLong:32/float>>.
+
 tick() ->
     erlang:monotonic_time().
 
-make_node(Addr, IVal, Time) ->
+make_node(Addr, NodeInfo, Time) ->
     ?dbg("make_node: ~s ~s\n", [State, format_addr(Addr)]),
-    #node { addr=Addr, ival=IVal, first_seen = Time, 
+    IVal = NodeInfo#node_info.ping_interval,
+    #node { addr=Addr, info=NodeInfo, ival=IVal, first_seen = Time, 
 	    last_seen = Time, up_tick = Time }.
 
 %% remove the oldest node that is also down 
@@ -1180,7 +1357,6 @@ remove_oldest(State,N,S) ->
       end, LsOld),
     S.
 
-
 %% get neighbours in state State sort by last_seen
 get_last_seen(State, S) ->
     Ls = 
@@ -1192,3 +1368,11 @@ get_last_seen(State, S) ->
 		  Acc
 	  end, [], S#s.tab),
     lists:keysort(1, Ls).
+
+%% zero pad or trunc
+zero_pad(Bin, Size) when byte_size(Bin) > Size ->
+    <<TruncBin:Size/binary,_/binary>> = Bin,
+    TruncBin;
+zero_pad(Bin, Size) ->
+    PadSize = Size-byte_size(Bin),
+    <<Bin/binary, 0:PadSize/unit:8>>.

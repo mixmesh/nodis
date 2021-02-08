@@ -22,6 +22,7 @@
 -export([get_location/1, get_location/2]).
 -export([get_node_location/0, get_node_location/1]).
 -export([set_node_location/1, set_node_location/2]).
+-export([set_node_habitat/1, set_node_habitat/2]).
 
 %% test
 -export([send/1, send/2]).
@@ -66,16 +67,44 @@
 
 %% Ping Header defaults
 -define(NODIS_MAGIC, <<"MIXMESH">>).
--define(NODIS_FEATURES,   16#00000000).
+-define(NODIS_FEATURES,            16#000110F1).  %% 1xuint32()
+-define(NODIS_FEATURE_NODEID,      16#00000001).  %% 32xbyte()
+-define(NODIS_FEATURE_CACHE_TMO,   16#00000002).  %% 1xuint32()
+-define(NODIS_FEATURE_LOCATION,    16#00000010).  %% 2xfloat()
+-define(NODIS_FEATURE_SPEED,       16#00000020).  %% 1xfloat()
+-define(NODIS_FEATURE_DELTA,       16#00000040).  %% 2xfloat()
+-define(NODIS_FEATURE_DESTINATION, 16#00000080).  %% 2xfloat()
+-define(NODIS_FEATURE_HABITAT,     16#00000100).  %% 5xfloat()
+%% 2-bits for node size 
+-define(NODIS_FEATURE_SIZE_MASK,   16#0000F000).
+-define(NODIS_FEATURE_TINY,        16#00001000).
+-define(NODIS_FEATURE_SMALL,       16#00002000).
+-define(NODIS_FEATURE_MEDIUM,      16#00003000).
+-define(NODIS_FEATURE_LARGE,       16#00004000).
+-define(NODIS_FEATURE_HUGE,        16#00005000).
+%% pure static node (ignore speed and delta)
+-define(NODIS_FEATURE_TYPE_MASK,   16#000F0000).
+-define(NODIS_FEATURE_GENERIC,     16#00010000).
+-define(NODIS_FEATURE_STATIC,      16#00020000).
+-define(NODIS_FEATURE_ROUTER,      16#00030000).
+-define(NODIS_FEATURE_POSTBOX,     16#00040000).
+
 -define(NODIS_LAT,        0.0).
 -define(NODIS_LONG,       0.0).
--define(NODIS_SPD,        0.0).
+-define(NODIS_SPEED,      0.0).
 -define(NODIS_DELTA_LAT,  0.0).
 -define(NODIS_DELTA_LONG, 0.0).
+-define(NODIS_DEST_LAT,   0.0).
+-define(NODIS_DEST_LONG,  0.0).
+-define(NODIS_HAB_LAT1,   0.0).
+-define(NODIS_HAB_LONG1,  0.0).
+-define(NODIS_HAB_LAT2,   0.0).
+-define(NODIS_HAB_LONG2,  0.0).
+-define(NODIS_HAB_RADIUS, 0.0).
+
 %% forwarding location
--define(NODIS_DEST_LAT,   0).
--define(NODIS_DEST_LONG,  0).
--define(NODIS_CACHE_TIMEOUT, 3600).  %% 1hour timeout
+
+-define(NODIS_CACHE_TMO, 3600).  %% 1hour timeout
 
 -define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
 
@@ -88,14 +117,19 @@
 	 %% supported features
 	 features = ?NODIS_FEATURES  :: uint32(),
 	 %% 
-	 cache_timeout = ?NODIS_CACHE_TIMEOUT :: uint32(),
-	 lat  = ?NODIS_LAT  :: float(),
-	 long = ?NODIS_LONG :: float(),
-	 spd  = ?NODIS_SPD :: float(),
-	 delta_lat  = ?NODIS_DELTA_LAT ::float(),
-	 delta_long = ?NODIS_DELTA_LONG :: float(),
-	 dest_lat  = ?NODIS_DEST_LAT :: float(),
-	 dest_long = ?NODIS_DEST_LONG :: float()
+	 cache_timeout = ?NODIS_CACHE_TMO :: uint32(),
+	 lat           = ?NODIS_LAT  :: float(),
+	 long          = ?NODIS_LONG :: float(),
+	 spd           = ?NODIS_SPEED :: float(),
+	 delta_lat     = ?NODIS_DELTA_LAT ::float(),
+	 delta_long    = ?NODIS_DELTA_LONG :: float(),
+	 dest_lat      = ?NODIS_DEST_LAT :: float(),
+	 dest_long     = ?NODIS_DEST_LONG :: float(),
+	 hab_lat1      = ?NODIS_HAB_LAT1 :: float(),
+	 hab_long1     = ?NODIS_HAB_LONG1 :: float(),
+	 hab_lat2      = ?NODIS_HAB_LAT2 :: float(),
+	 hab_long2     = ?NODIS_HAB_LONG2 :: float(),
+	 hab_radius    = ?NODIS_HAB_RADIUS :: float()
 	}).
 
 -record(node,
@@ -128,13 +162,7 @@
 -define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
 -define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
 
-%% 2-bits for node size 
--define(NODIS_FEATURE_TINY,    16#00000000).
--define(NODIS_FEATURE_SMALL,   16#00000001).
--define(NODIS_FEATURE_MEDIUM,  16#00000002).
--define(NODIS_FEATURE_HUGE,    16#00000003).
-%% pure static node (ignore speed and delta)
--define(NODIS_FEATURE_STATIC,  16#00000010).
+
 
 -record(conf,
 	{
@@ -198,14 +226,12 @@
 -define(ANY4, {0,0,0,0}).
 -define(ANY6, {0,0,0,0,0,0,0,0}).
 
-
 -define(NODIS_MULTICAST_ADDR4, {224,0,0,1}).
 -define(NODIS_MULTICAST_ADDR6, {16#FF12,0,0,0,0,0,0,1234}).
 -define(NODIS_DEFAULT_UDP_PORT, 9900).  %% match mixmesh sync port
 
 -define(NODIS_MULTICAST_IF4,  ?ANY4).
 -define(NODIS_MULTICAST_IF6,  ?ANY6).
-
 
 -type nodis_option() ::
 	#{ simulation => boolean(),
@@ -344,15 +370,24 @@ get_node_location(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, get_node_location).
 
 %% Set own location info
--spec set_node_location(Addr::nodis:location()) -> nodis:location().
+-spec set_node_location(Location::noids:location()) -> ok.
 set_node_location(Location) when is_map(Location) ->
     gen_server:call(?SERVER, {set_node_location,Location}).
 
 %% Get neighbour location info
--spec set_node_location(Pid::pid(), Location::nodis:location()) -> 
-	  nodis:location().
-set_node_location(Pid,Location) when is_pid(Pid), is_map(Location) ->
-    gen_server:call(Pid, {set_node_location,Location}).
+-spec set_node_location(Pid::pid(), Loc::nodis:location()) -> ok.
+set_node_location(Pid,Loc) when is_pid(Pid), is_map(Loc) ->
+    gen_server:call(Pid, {set_node_location,Loc}).
+
+%% Set own habitat info
+-spec set_node_habitat(Hab::nodis:habitat()) -> ok.
+set_node_habitat(Hab) when is_map(Hab) ->
+    gen_server:call(?SERVER, {set_node_habitat,Hab}).
+
+%% Get neighbour location info
+-spec set_node_habitat(Pid::pid(), Location::nodis:location()) -> ok.
+set_node_habitat(Pid,Hab) when is_pid(Pid), is_map(Hab) ->
+    gen_server:call(Pid, {set_node_habitat,Hab}).
 
 %% test - broadcast any message
 send(Data) ->
@@ -614,25 +649,33 @@ handle_call({get_location,Addr}, _From, S) ->
 	false ->
 	    {reply, undefined, S};
 	N ->
-	    Info = N#node.info,
-	    Location = #{ lat => Info#node_info.lat,
-			  long => Info#node_info.long,
-			  spd => Info#node_info.spd,
-			  delta_lat => Info#node_info.delta_lat,
-			  delta_long => Info#node_info.delta_long,
-			  dest_lat   => Info#node_info.dest_lat,
-			  dest_long  => Info#node_info.dest_long },
+	    I = N#node.info,
+	    Fs = decode_features(I#node_info.features),
+	    H = #{ hab_lat1=> I#node_info.hab_lat1,
+		   hab_long1=> I#node_info.hab_long1,
+		   hab_lat2 => I#node_info.hab_lat2,
+		   hab_long2 => I#node_info.hab_long2,
+		   hab_radius => I#node_info.hab_radius },
+	    Location = #{ features => Fs,
+			  lat => I#node_info.lat,
+			  long => I#node_info.long,
+			  spd => I#node_info.spd,
+			  delta_lat => I#node_info.delta_lat,
+			  delta_long => I#node_info.delta_long,
+			  dest_lat   => I#node_info.dest_lat,
+			  dest_long  => I#node_info.dest_long,
+			  hab => H },
 	    {reply, Location, S}
     end;
 handle_call(get_node_location, _From, S) ->
-    Info = (S#s.conf)#conf.info,
-    Location = #{ lat => Info#node_info.lat,
-		  long => Info#node_info.long,
-		  spd => Info#node_info.spd,
-		  delta_lat => Info#node_info.delta_lat,
-		  delta_long => Info#node_info.delta_long,
-		  dest_lat   => Info#node_info.dest_lat,
-		  dest_long  => Info#node_info.dest_long },
+    I = (S#s.conf)#conf.info,
+    Location = #{ lat => I#node_info.lat,
+		  long => I#node_info.long,
+		  spd => I#node_info.spd,
+		  delta_lat => I#node_info.delta_lat,
+		  delta_long => I#node_info.delta_long,
+		  dest_lat   => I#node_info.dest_lat,
+		  dest_long  => I#node_info.dest_long },
     {reply, Location, S};
 
 handle_call({set_node_location, L}, _From, S) ->
@@ -646,6 +689,26 @@ handle_call({set_node_location, L}, _From, S) ->
 		      delta_long=maps:get(delta_long,L,I#node_info.delta_long),
 		      dest_lat=maps:get(dest_lat,L,I#node_info.dest_lat),
 		      dest_long=maps:get(dest_long,L,I#node_info.dest_long) },
+    {reply, ok, S#s { conf = Conf#conf { info = J }}};
+
+handle_call(get_node_habitat, _From, S) ->
+    I = (S#s.conf)#conf.info,
+    H = #{ hab_lat1=> I#node_info.hab_lat1,
+	   hab_long1=> I#node_info.hab_long1,
+	   hab_lat2 => I#node_info.hab_lat2,
+	   hab_long2 => I#node_info.hab_long2,
+	   hab_radius => I#node_info.hab_radius },
+    {reply, H, S};
+
+handle_call({set_node_habitat, H}, _From, S) ->
+    Conf = S#s.conf,
+    I = Conf#conf.info,
+    J =
+	I#node_info { hab_lat1=maps:get(hab_lat1,H,I#node_info.hab_lat1),
+		      hab_long1=maps:get(hab_long1,H,I#node_info.hab_long1),
+		      hab_lat2=maps:get(hab_lat2,H,I#node_info.hab_lat2),
+		      hab_long2=maps:get(hab_long2,H,I#node_info.hab_long2),
+		      hab_radius=maps:get(hab_radius,H,I#node_info.hab_radius)},
     {reply, ok, S#s { conf = Conf#conf { info = J }}};
 
 handle_call(dump, _From, S) ->
@@ -792,6 +855,64 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
+
+-define(FEATURE(F,Flag,Name),
+	       if F band (Flag) =/= 0 -> [(Name)];
+		  true -> []
+	       end).
+
+feature_map() ->
+    #{
+      nodeid => ?NODIS_FEATURE_NODEID,
+      cache_timeout => ?NODIS_FEATURE_CACHE_TMO,
+      location => ?NODIS_FEATURE_LOCATION,
+      speed => ?NODIS_FEATURE_SPEED,
+      delta => ?NODIS_FEATURE_DELTA,
+      destination => ?NODIS_FEATURE_DESTINATION,
+      habitat => ?NODIS_FEATURE_HABITAT,
+
+      tiny => ?NODIS_FEATURE_TINY,
+      small => ?NODIS_FEATURE_SMALL,
+      medium => ?NODIS_FEATURE_MEDIUM,
+      large => ?NODIS_FEATURE_LARGE,
+      huge => ?NODIS_FEATURE_HUGE,
+	
+      generic => ?NODIS_FEATURE_GENERIC,
+      static  => ?NODIS_FEATURE_STATIC,
+      router  => ?NODIS_FEATURE_ROUTER,
+      postbox => ?NODIS_FEATURE_POSTBOX
+     }.
+
+%% decode feature bits
+decode_features(F) ->
+    ?FEATURE(F,?NODIS_FEATURE_NODEID, nodeid) ++
+    ?FEATURE(F,?NODIS_FEATURE_CACHE_TMO, cache_timeout) ++
+    ?FEATURE(F,?NODIS_FEATURE_LOCATION,  location) ++
+    ?FEATURE(F,?NODIS_FEATURE_SPEED,     speed) ++
+    ?FEATURE(F,?NODIS_FEATURE_DELTA,     delta) ++
+    ?FEATURE(F,?NODIS_FEATURE_DESTINATION, destination) ++
+    ?FEATURE(F,?NODIS_FEATURE_HABITAT,     habitat) ++
+    case F band ?NODIS_FEATURE_SIZE_MASK of
+	?NODIS_FEATURE_TINY -> [tiny];
+	?NODIS_FEATURE_SMALL -> [small];
+	?NODIS_FEATURE_MEDIUM -> [medium];
+	?NODIS_FEATURE_HUGE   -> [huge];
+	_ -> []
+    end ++
+    case F band ?NODIS_FEATURE_TYPE_MASK of
+	?NODIS_FEATURE_GENERIC -> [generic];
+	?NODIS_FEATURE_STATIC  -> [static];
+	?NODIS_FEATURE_ROUTER  -> [router];
+	?NODIS_FEATURE_POSTBOX -> [postbox]
+    end.
+
+encode_features(Fs) ->    
+    encode_features_(Fs, 0).
+
+encode_features_([F|Fs], Flags) ->
+    encode_features_(Fs, maps:get(F, feature_map(), 0) bor Flags);
+encode_features_([], Flags) ->
+    Flags.
 
 config_lookup(Keys, Default) ->
     try config:lookup(Keys, Default) of
@@ -1103,16 +1224,26 @@ dump_nodes(S=#s{conf=Conf}) ->
       end, 1, S#s.tab).
 
 format_node(I,State, Addr,TimeType,Time, Lt, Node, LTm, Info) ->
-    io:format("~w: state=~w ~s ~s: ~.2fs last: ~.2fs ival=~w con=~w ltm=~s, lat=~.4f, long=~.4f, spd=~.4f\n",
+    io:format("~w: state=~w ~s ~s: ~.2fs last: ~.2fs\n"
+	      "    ival=~w con=~w ltm=~s\n"
+	      "    features: ~w\n"
+	      "    location: lat=~.4f,long=~.4f,spd=~.4f\n"
+	      "    habitat: lat1=~.4f,long1=~.4f,lat2=~.4f,long2=~.4f,r=~.4f\n",
 	      [I, State, Addr,
 	       TimeType, Time/1000000,
 	       Lt/1000000,
 	       Info#node_info.ping_interval, %% == Node#node.ival
 	       Node#node.con,
 	       LTm,
+	       decode_features(Info#node_info.features),
 	       Info#node_info.lat,
 	       Info#node_info.long,
-	       Info#node_info.spd
+	       Info#node_info.spd,
+	       Info#node_info.hab_lat1,
+	       Info#node_info.hab_long1,
+	       Info#node_info.hab_lat2,
+	       Info#node_info.hab_long2,
+	       Info#node_info.hab_radius
 	      ]).
 
 time_diff_ms(A, B) ->
@@ -1300,18 +1431,25 @@ send_message(Data, S) ->
 	    {{error,_Error}, S}
     end.
 
+%% current header size = 108 bytes
 get_header(#conf{ magic=Magic },
 	   <<Magic:16/binary, Features:32, NodeID:32/binary,
 	     IVal:32, CacheTimeout:32,
 	     Lat:32/float, Long:32/float, Spd:32/float,
 	     DLat:32/float, DLong:32/float,
-	     DestLat:32/float, DestLong:32/float, _/binary>>) ->
+	     DestLat:32/float, DestLong:32/float,
+	     HabLat1:32/float,HabLong1:32/float,
+	     HabLat2:32/float,HabLong2:32/float,
+	     HabRadius:32/float,_/binary>>) ->
     #node_info { ping_interval = IVal,
 		 nodeid = NodeID,
 		 features=Features,
 		 lat=Lat, long=Long, spd=Spd,
 		 delta_lat=DLat,delta_long=DLong,
 		 dest_lat=DestLat,dest_long=DestLong,
+		 hab_lat1=HabLat1, hab_long1=HabLong1,
+		 hab_lat2=HabLat2, hab_long2=HabLong2,
+		 hab_radius=HabRadius,
 		 cache_timeout=CacheTimeout };
 get_header(_Conf, _Data) -> %% No match
     false.
@@ -1324,12 +1462,18 @@ make_header(#conf{ magic=Magic,
 			     lat=Lat, long=Long, spd=Spd,
 			     delta_lat=DeltaLat,delta_long=DeltaLong,
 			     dest_lat=DestLat,dest_long=DestLong,
+			     hab_lat1=HabLat1, hab_long1=HabLong1,
+			     hab_lat2=HabLat2, hab_long2=HabLong2,
+			     hab_radius=HabRadius,
 			     cache_timeout=CacheTimeout}}) ->
     <<Magic:16/binary, Features:32, NodeID:32/binary,
       IVal:32, CacheTimeout:32,
       Lat:32/float, Long:32/float, Spd:32/float,
       DeltaLat:32/float, DeltaLong:32/float,
-      DestLat:32/float, DestLong:32/float>>.
+      DestLat:32/float, DestLong:32/float,
+      HabLat1:32/float,HabLong1:32/float,
+      HabLat2:32/float,HabLong2:32/float,
+      HabRadius:32/float>>.
 
 tick() ->
     erlang:monotonic_time().

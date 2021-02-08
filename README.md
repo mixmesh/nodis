@@ -64,4 +64,7 @@ the following information
 	     IVal:32, CacheTimeout:32,
 	     Lat:32/float, Long:32/float, Spd:32/float,
 	     DeltaLat:32/float, DeltaLong:32/float,
-	     DestLat:32/float, DestLong:32/float>>
+	     DestLat:32/float, DestLong:32/float,
+	     HabLat1:32/float,HabLong1:32/float,
+	     HabLat2:32/float,HabLong2:32/float,
+	     HabRadius:32/float>>

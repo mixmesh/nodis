@@ -15,26 +15,24 @@
 -export([connect/2, connect/3]).
 -export([accept/2, accept/3]).
 -export([get_state/1, get_state/2]).
--export([get_location/1, get_location/2]).
--export([get_node_location/0, get_node_location/1]).
+-export([get_info/2, get_info/3]).
 -export([set_node_location/1, set_node_location/2]).
+-export([set_node_habitat/1, set_node_habitat/2]).
+-export([set_node_info/1, set_node_info/2]).
+-export([unset_node_info/1, unset_node_info/2]).
+
+-export([get_node_config/1, get_node_config/2]).
+-export([set_node_config/1, set_node_config/2]).
+
 -export([i/0, i/1]).
 
 -export_type([node_state/0]).
 -export_type([addr/0]).
--export_type([location/0]).
 
 -include_lib("apptools/include/log.hrl").
 
 -type node_state() :: undefined | up | down | wait.
 -type addr() :: {inet:ip_address(), inet:port_number()}.
--type location() :: #{ lat => float(),          %% current location
-		       long => float(),
-		       spd => float(),          %% speed km/h
-		       delta_lat => float(),    %% speed lat km/h
-		       delta_long => float(),   %% speed long km/h
-		       dest_lat   => float(),   %% current destination
-		       dest_long  => float() }.
 
 start() ->
     application:start(nodis).
@@ -84,17 +82,11 @@ get_state(Addr) ->
 get_state(Pid,Addr) ->
     nodis_serv:get_state(Pid, Addr).
 
-get_location(Addr) ->
-    nodis_serv:get_location(Addr).
+get_info(Addr, Info) ->
+    nodis_serv:get_info(Addr, Info).
 
-get_location(Pid,Addr) ->
-    nodis_serv:get_location(Pid, Addr).
-
-get_node_location() ->
-    nodis_serv:get_node_location().
-
-get_node_location(Pid) ->
-    nodis_serv:get_node_location(Pid).
+get_info(Pid,Addr,Info) ->
+    nodis_serv:get_info(Pid, Addr, Info).
 
 set_node_location(Location) ->
     nodis_serv:set_node_location(Location).
@@ -102,9 +94,34 @@ set_node_location(Location) ->
 set_node_location(Pid,Location) ->
     nodis_serv:set_node_location(Pid, Location).
 
+set_node_habitat(Habitat) ->
+    nodis_serv:set_node_habitat(Habitat).
+
+set_node_habitat(Pid,Habitat) ->
+    nodis_serv:set_node_habitat(Pid,Habitat).
+
+set_node_info(Info) ->
+    nodis_serv:set_node_info(Info).
+set_node_info(Pid,Info) ->
+    nodis_serv:set_node_info(Pid, Info).
+
+unset_node_info(Info) ->
+    nodis_serv:unset_node_info(Info).
+unset_node_info(Pid,Info) ->
+    nodis_serv:unset_node_info(Pid, Info).
+
+set_node_config(Config) ->
+    nodis_serv:set_node_config(Config).
+set_node_config(Pid,Config) ->
+    nodis_serv:set_node_config(Pid, Config).
+
+get_node_config(Config) ->
+    nodis_serv:get_node_config(Config).
+get_node_config(Pid,Config) ->
+    nodis_serv:get_node_config(Pid, Config).
+
 config_change(_Changed,_New,_Removed) ->
     ?dbg_log_fmt("config_change changed=~w, new=~w, removed=~w\n", 
 		 [_Changed,_New,_Removed]),
     nodis_serv ! reload,
     ok.
-    

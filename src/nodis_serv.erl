@@ -810,8 +810,8 @@ handle_call({get_node_config, Keys}, _From, S) ->
 	    {reply, [ {Key,get_conf(Key,S#s.conf)} || Key <- Keys ], S}
     end;
 handle_call({read_node_counter, Counter}, _From, S) ->
-    Counter = read_counter(Counter, S, 0),
-    {reply, Counter, S};
+    Value = read_counter(Counter, S, 0),
+    {reply, Value, S};
 
 handle_call(dump, _From, S) ->
     io:format("dump\n"),

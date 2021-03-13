@@ -28,6 +28,8 @@
 %% GPS location
 -export([set_node_location/1, set_node_location/2]).
 -export([set_node_habitat/1, set_node_habitat/2]).
+%% 
+-export([read_node_counter/1, read_node_counter/2]).
 
 %% test
 -export([send/1, send/2]).
@@ -59,6 +61,7 @@
 		    Radius::float()}.
 -type info_key() :: nodeid | features | size | type | chache_time | 
 		    location | speed | delta | destination | habitat.
+-type counter_name() :: ping | up | down | wait.
 
 -type info() ::
 	# { 
@@ -501,6 +504,15 @@ get_node_config(Keys) when is_list(Keys) ->
 get_node_config(Pid,Keys) when is_list(Keys) ->
     gen_server:call(Pid,{get_node_config,Keys}).
 
+%% Get local node counters 
+-spec read_node_counter(Counter::counter_name()) -> ok.
+read_node_counter(Counter) ->
+    gen_server:call(?SERVER,{read_node_counter,Counter}).
+
+-spec read_node_counter(Pid::pid(),Counter::counter_name()) -> ok.
+read_node_counter(Pid, Counter) ->
+    gen_server:call(Pid, {read_node_counter,Counter}).
+
 %% test - broadcast any message
 send(Data) ->
     send(?SERVER, Data).
@@ -566,6 +578,7 @@ init([InputOpts]) ->
     ets:insert(Tab, #node_counter{state=up}),
     ets:insert(Tab, #node_counter{state=down}),
     ets:insert(Tab, #node_counter{state=wait}),
+    ets:insert(Tab, #node_counter{state=ping}),
     Simulator = case config_lookup([simulator], false) of
 		    false -> false;
 		    _ -> true
@@ -796,6 +809,10 @@ handle_call({get_node_config, Keys}, _From, S) ->
 	is_list(Keys) ->
 	    {reply, [ {Key,get_conf(Key,S#s.conf)} || Key <- Keys ], S}
     end;
+handle_call({read_node_counter, Counter}, _From, S) ->
+    Counter = read_counter(Counter, S, 0),
+    {reply, Counter, S};
+
 handle_call(dump, _From, S) ->
     io:format("dump\n"),
     io:format("    oport = ~w\n", [S#s.oport]),
@@ -1009,6 +1026,7 @@ start_ping(Delay) when is_integer(Delay), Delay > 0 ->
 
 %% handle incoming node ping
 handle_ping(Addr,IVal,Info,S) ->
+    ets:update_counter(S#s.tab, ping, 1), %% fixme: wrap?
     Now = tick(),
     case read_node(Addr, S) of
 	false ->
@@ -1050,10 +1068,16 @@ read_node(Addr, S) ->
 	[N] -> N
     end.
 
-read_counter(State, S) ->
-    [#node_counter{count=Count}] = ets:lookup(S#s.tab, State),
-    Count.
+read_counter(Counter, S) ->
+    [#node_counter{count=Value}] = ets:lookup(S#s.tab, Counter),
+    Value.
 
+read_counter(Counter, S, Default) ->
+    case ets:lookup(S#s.tab, Counter) of
+	[] -> Default;
+	[#node_counter{count=Value}] -> Value
+    end.
+	    
 set_node(State, N, S) when N#node.state =/= State ->
     %% state change
     case State of
@@ -1187,7 +1211,10 @@ dump_counters(S) ->
     io:format("counters\n"),
     io:format("    #up = ~w\n", [read_counter(up, S)]),
     io:format("    #down = ~w\n", [read_counter(down, S)]),
-    io:format("    #wait = ~w\n", [read_counter(wait, S)]).
+    io:format("    #wait = ~w\n", [read_counter(wait, S)]),
+    io:format("    #ping = ~w\n", [read_counter(ping, S)]),
+    ok.
+    
 
 dump_queue(S) ->
     io:format("queue\n|"),

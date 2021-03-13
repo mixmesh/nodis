@@ -24,6 +24,8 @@
 -export([get_node_config/1, get_node_config/2]).
 -export([set_node_config/1, set_node_config/2]).
 
+-export([read_node_counter/1, read_node_counter/2]).
+
 -export([i/0, i/1]).
 
 -export_type([node_state/0]).
@@ -119,6 +121,13 @@ get_node_config(Config) ->
     nodis_serv:get_node_config(Config).
 get_node_config(Pid,Config) ->
     nodis_serv:get_node_config(Pid, Config).
+
+read_node_counter(Counter) ->
+    nodis_serv:read_node_counter(Counter).
+
+read_node_counter(Pid, Counter) ->
+    nodis_serv:read_node_counter(Pid, Counter).
+    
 
 config_change(_Changed,_New,_Removed) ->
     ?dbg_log_fmt("config_change changed=~w, new=~w, removed=~w\n", 

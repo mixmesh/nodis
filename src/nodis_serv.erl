@@ -33,8 +33,11 @@
 
 %% test
 -export([send/1, send/2]).
+-export([encode/1, decode/1]).
+-export([make_addr_map/0]).
 %% simulation
 -export([simping/4]).
+
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -45,7 +48,7 @@
 %% Test API
 -export([i/0, i/1]).
 
-%% -define(dbg(F,A), io:format((F),(A))).
+%%-define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
 -define(err(F,A), io:format((F),(A))).
 -define(warn(F,A), io:format((F),(A))).
@@ -56,23 +59,43 @@
 -type tick()    :: integer().
 -type timer()   :: reference().
 %%-type uint32()  :: 0..16#ffffffff.
--type gps_coordinate() :: {Longitude::float(), Latitude::float()}.
+-type gps_coordinate() :: {Long::number(), Lat::number()}.
 -type habitat() :: {Pos1::gps_coordinate(),Pos2::gps_coordinate(),
-		    Radius::float()}.
--type info_key() :: nodeid | features | size | type | chache_time | 
-		    location | speed | delta | destination | habitat.
+		    Radius::number()}.
 -type counter_name() :: ping | up | down | wait.
+
+%%
+%% Info properties:
+%%
+%% Key name         Value type
+%% "node-id"        binary(32)
+%% "node-size"      tiny|small|medium|huge
+%% "node-type"      generic|static|router|postbox
+%% "location"       [Long::number(), Lat::number()]
+%% "speed"          Speed::number()
+%% "delta"          [LongSpeed::number(), LatSpeed::number()]
+%% "destination"    [Long::number(), Lat::number()]
+%% "habitat"        [Pos1::[Long::number(),Lat::number()],
+%%                   Pos2::[Long::number(),Lat::number()],
+%%                   Radis::number()}
+%% "cache-timeout" :: integer()
+%%
+-type info_key() :: 
+	size | 
+	type | 
+	nodeid | 
+	chache_time | 
+	location | 
+	speed | 
+	delta | 
+	destination | 
+	habitat |
+	atom() |
+	string().
 
 -type info() ::
 	# { 
-	    %% supported features (derived) not an option
-	    features => #{ location => boolean(),
-			   speed    => boolean(),
-			   delta    => boolean(),
-			   destination => boolean(),
-			   habitat     => boolean(),
-			   nodeid      => boolean(),
-			   cache_timeout => boolean()},
+	    %% MANDATORY 
 
 	    %% declared size of message cache
 	    size => tiny|small|medium|large|huge,
@@ -86,22 +109,25 @@
 	    nodeid => <<_:(32*8)>>,
 
 	    %% maximum time node is allowed to be cached
-	    cache_timeout => time_ms(),
+	    'cache-timeout' => time_ms(),
 
 	    %% GPS location
 	    location => gps_coordinate(),
 
 	    %% GPS speed km/h
-	    speed    => float(),
+	    speed    => number(),
 
 	    %% GPS delta speed (may be derived) {km/h, km/h}
-	    delta    => {LongSpeed::float(), LatSpeed::float()},
+	    delta    => {LongSpeed::number(), LatSpeed::number()},
 	    
 	    %% Current destination
 	    destination => gps_coordinate(),
 
 	    %% Declared or computed habitat
 	    habitat => habitat()
+
+	    %% also Key::string() => Value::term()
+	    %%      Key::atom() => Value::term()
 	  }.
 
 -type config_key() :: ping_delay | ping_interval | 
@@ -141,56 +167,11 @@
 %% Ping Header defaults
 -define(NODIS_MAGIC, <<"MIXMESH">>).
 
-%% 16-bit features
--define(NODIS_FEATURE_LOCATION,      16#00000001).  %% 2xfloat()
--define(NODIS_FEATURE_SPEED,         16#00000002).  %% 1xfloat()
--define(NODIS_FEATURE_DELTA,         16#00000004).  %% 2xfloat()
--define(NODIS_FEATURE_DESTINATION,   16#00000008).  %% 2xfloat()
--define(NODIS_FEATURE_HABITAT,       16#00000010).  %% 5xfloat()
--define(NODIS_FEATURE_NODEID,        16#00000020).  %% 32xbyte()
--define(NODIS_FEATURE_CACHE_TIMEOUT, 16#00000040).  %% 1xuint32()
-
-%% feature list in bit order!
--define(FEATURE_LIST,[location,speed,delta,destination,habitat,
-		      nodeid,cache_tmo]).
-
-%% 4-bits for node size
--define(NODIS_FEATURE_SIZE_MASK,   16#000F0000).
--define(NODIS_FEATURE_TINY,        16#00010000).
--define(NODIS_FEATURE_SMALL,       16#00020000).
--define(NODIS_FEATURE_MEDIUM,      16#00030000).
--define(NODIS_FEATURE_LARGE,       16#00040000).
--define(NODIS_FEATURE_HUGE,        16#00050000).
-%% 4-bits for node type, pure static node (ignore speed and delta)
--define(NODIS_FEATURE_TYPE_MASK,   16#00F00000).
--define(NODIS_FEATURE_GENERIC,     16#00100000).
--define(NODIS_FEATURE_STATIC,      16#00200000).
--define(NODIS_FEATURE_ROUTER,      16#00300000).
--define(NODIS_FEATURE_POSTBOX,     16#00400000).
-
--define(NODIS_DEFAULT_FEATURES,    
-	(?NODIS_FEATURE_LOCATION bor ?NODIS_FEATURE_DELTA)).
-
--define(NODIS_LAT,        0.0).
--define(NODIS_LONG,       0.0).
--define(NODIS_SPEED,      0.0).
--define(NODIS_DELTA_LAT,  0.0).
--define(NODIS_DELTA_LONG, 0.0).
--define(NODIS_DEST_LAT,   0.0).
--define(NODIS_DEST_LONG,  0.0).
--define(NODIS_HAB_LAT1,   0.0).
--define(NODIS_HAB_LONG1,  0.0).
--define(NODIS_HAB_LAT2,   0.0).
--define(NODIS_HAB_LONG2,  0.0).
--define(NODIS_HAB_RADIUS, 0.0).
-
 %% forwarding location
 
 -define(NODIS_CACHE_TMO, 3600).  %% 1hour timeout
 
 -define(NODIS_DEFAULT_PING_INTERVAL, 5000). %% 5s
-
-
 
 -record(node,
 	{
@@ -268,7 +249,9 @@
 	}).
 
 %% MAC specific reuseport options
--define(SO_REUSEPORT, 16#0200).
+-define(SO_REUSEPORT, 15).
+-define(BSD_SO_REUSEPORT, 16#0200).
+
 
 -define(IPPROTO_IP,   0).
 -define(IPPROTO_TCP,  6).
@@ -427,13 +410,13 @@ set_node_habitat(Pid,Habitat={?COORD(_Long1,_Lat1),?COORD(_Long2,_Lat2),
 %% clear node info
 -spec unset_node_info(Info::[info_key()]) -> ok.
 unset_node_info(Info) when is_list(Info) ->
-    Map = maps:from_list([{Key,undefined} || Key <- Info, is_atom(Key)]),
+    Map = maps:from_list([{Key,undefined} || Key <- Info]),
     gen_server:call(?SERVER, {set_node_info,Map}).
 
 %% Set own location info
 -spec unset_node_info(Pid::pid(),Info::[info_key()]) -> ok.
 unset_node_info(Pid,Info) when is_pid(Pid), is_list(Info) ->
-    Map = maps:from_list([{Key,undefined} || Key <- Info, is_atom(Key)]),
+    Map = maps:from_list([{Key,undefined} || Key <- Info]),
     gen_server:call(Pid, {set_node_info,Map}).
 
 %% Get neighbour state
@@ -483,16 +466,16 @@ set_node_info(Pid,Info) when is_list(Info) ->
 %% Set config items
 -spec set_node_config(Config::config()) -> ok.
 set_node_config(Config) when is_map(Config) ->
-    gen_server:call({set_node_config,Config});
+    gen_server:call(?SERVER, {set_node_config,Config});
 set_node_config(Config) when is_list(Config) ->
-    set_node_info(maps:from_list(Config)).
+    set_node_config(maps:from_list(Config)).
 
 %% Set config items
 -spec set_node_config(Pid::pid(),Config::config()) -> ok.
 set_node_config(Pid, Config) when is_map(Config) ->
     gen_server:call(Pid, {set_node_config,Config});
 set_node_config(Pid,Config) when is_list(Config) ->
-    set_node_info(Pid,maps:from_list(Config)).
+    set_node_config(Pid,maps:from_list(Config)).
 
 %% Get config items
 -spec get_node_config(Keys::[config_key()]) -> ok.
@@ -520,7 +503,7 @@ send(Pid, Data) ->
     gen_server:call(Pid,{send,Data}).
 %%
 %% simulation feed nodis_serv with simulated ping data
-%% will show up with the player subscriver as
+%% will show up with the player subscriber as
 %% {up, Addr} | {missed, Addr} | {down, Addr}
 %% NOT {wait,Addr} we must handle this from application
 %%
@@ -610,6 +593,8 @@ init([InputOpts]) ->
 	    AddrMap = make_addr_map(),
 	    Laddr = if is_tuple(Laddr0) ->
 			    Laddr0;
+		       Laddr0 =:= any; Laddr0 =:= undefined ->
+			    select_any(Family);
 		       is_list(Laddr0) ->
 			    case lookup_ip(Laddr0, Family, AddrMap) of
 				[] ->
@@ -617,8 +602,14 @@ init([InputOpts]) ->
 				    select_any(Family);
 				[IP|_] -> IP
 			    end;
-		       Laddr0 =:= any; Laddr0 =:= undefined ->
-			    select_any(Family);
+		       is_atom(Laddr0) ->
+			    Laddr00 = atom_to_list(Laddr0),
+			    case lookup_ip(Laddr00, Family, AddrMap) of
+				[] ->
+				    ?warn("No such interface ~p",[Laddr00]),
+				    select_any(Family);
+				[IP|_] -> IP
+			    end;
 		       true ->
 			    ?warn("No such interface ~p",[Laddr0]),
 			    select_any(Family)
@@ -865,7 +856,7 @@ handle_info({udp,U,Addr,Port,Data}, S) when S#s.in == U ->
 	    {noreply, S};
        true ->
 	    NAddr = {Addr,Port-1},
-	    case get_header(S#s.conf, Data) of
+	    case decode_packet(S#s.conf, Data) of
 		false ->
 		    ?dbg("ignored data from ~s = ~p\n",
 			 [format_addr(NAddr),Data]),
@@ -1181,8 +1172,6 @@ notify_subs(S, Message) ->
       end, ok, S#s.subs).
 
 dump_conf(C) ->
-    Info = C#conf.info,
-    Features = maps:get(features, Info, #{}),
     io:format("settings:\n"),
     io:format("    simulation = ~w\n", [C#conf.simulation]),
     io:format("    hops = ~w\n", [C#conf.hops]),
@@ -1197,8 +1186,11 @@ dump_conf(C) ->
     io:format("    max_up_nodes = ~w\n", [C#conf.max_up_nodes]),
     io:format("    max_wait_nodes = ~w\n", [C#conf.max_wait_nodes]),
     io:format("    max_down_nodes = ~w\n", [C#conf.max_down_nodes]),
-    io:format("    features: ~w\n", [Features]),
-    format_features(Info, Features).
+    io:format("Info:\n"),
+    maps:foreach(fun(K,V) ->
+			 io:format("    ~p => ~p\n", [K,V])
+		 end, C#conf.info),
+    ok.
 
 cstring(<<0,_/binary>>) -> [];
 cstring(<<>>) -> [];
@@ -1287,40 +1279,18 @@ dump_nodes(S=#s{conf=Conf}) ->
       end, 1, S#s.tab).
 
 format_node(I,State, Addr,TimeType,Time, Lt, Node, LTm, Info) ->
-    Features = maps:get(features, Info, #{}),
     io:format("~w: state=~w ~s ~s: ~.2fs last: ~.2fs\n"
 	      "    ival=~w con=~w ltm=~s\n"
-	      "    features: ~w\n",
+	      "    info: ~p\n",
 	      [I, State, Addr,
 	       TimeType, Time/1000000,
 	       Lt/1000000,
 	       Node#node.ival,
 	       Node#node.con,
 	       LTm,
-	       Features]),
-    format_features(Info, Features).
+	       Info
+	      ]).
 
-format_features(Info, Features) ->
-    maps:fold(
-      fun(Key, true, _) ->
-	      Data = maps:get(Key,Info),
-	      io:format("    ~s: ~s\n",
-			[Key, format_data(Key,Data)])
-      end, ok, Features).
-
-format_data(_, Val) when is_float(Val) ->	 
-    io_lib:format("~.4f", [Val]);
-format_data(_, ?COORD(Long,Lat)) when is_float(Lat),is_float(Long) ->	 
-    io_lib:format("long=~.4f,lat=~.4f", [Long,Lat]);
-format_data(_, {{Long1,Lat1},{Long2,Lat2},R}) 
-  when is_float(Lat1),is_float(Long1),
-       is_float(Lat2),is_float(Long2) ->
-    io_lib:format("long1=~.4f,lat1=~.4f,long2=~.4f,lat2=~.4f,radius=~.4f", 
-		  [Long1,Lat1,Long2,Lat2,R]);
-format_data(_, X) when is_atom(X) ->
-    atom_to_list(X);
-format_data(_, Y) ->
-    io_lib:format("~p", [Y]).
 
 time_diff_ms(A, B) ->
     erlang:convert_time_unit(A - B,native,millisecond).
@@ -1342,8 +1312,10 @@ format_addr(NAddr) ->
 %%  multiple times.
 reuse_port() ->
     case os:type() of
-	{unix,Type} when Type =:= darwin; Type =:= freebsd ->
+	{unix,linux} ->
 	    [{raw,?SOL_SOCKET,?SO_REUSEPORT,<<1:32/native>>}];
+	{unix,Type} when Type =:= darwin; Type =:= freebsd ->
+	    [{raw,?SOL_SOCKET,?BSD_SO_REUSEPORT,<<1:32/native>>}];
 	_ ->
 	    []
     end.
@@ -1493,7 +1465,7 @@ send_ping(S) ->
     if Conf#conf.simulation ->
 	    {ok,S};
        true ->
-	    send_message(make_header(Conf), S)
+	    send_message(encode_packet(Conf), S)
     end.
 
 send_message(Data, S) ->
@@ -1536,196 +1508,146 @@ update_config(Conf, Updated) ->
 %% update node_info record with values from option map
 
 update_info(Info, Updates) ->
-    Features = maps:get(features, Info, #{}),
-    {Features1,Info1} =
-	maps:fold(
-	  fun
-	      (Key, undefined, {F,U}) ->
-		  {F#{Key=>false}, maps:remove(Key, U)};
-	      (ping_interval,_, Acc) -> %% ignored here
-		  Acc;
-	      (Key=nodeid, NodeID, {F,U}) when is_binary(NodeID) ->
-		  {F#{Key=>true}, U#{ nodeid => NodeID }};
-	      (Key=size, Size, {F,U}) when is_atom(Size) ->
-		  {F#{Key=>true}, U#{ size => Size }};
-	      (Key=type, Type, {F,U}) when is_atom(Type) ->
-		  {F#{Key=>true}, U#{ type => Type }};
-	      (Key=cache_timeout, Timeout, {F,U}) when
-		    is_integer(Timeout), Timeout > 0 ->
-		  {F#{Key=>true}, U#{ cache_timeout => Timeout }};
-	      (Key=location, Location=?COORD(_Long,_Lat), {F,U}) when 
-		    is_float(_Lat), is_float(_Long) ->
-		  {F#{Key=>true}, U#{ location => Location }};
-	      (Key=speed, Speed, {F,U}) when is_float(Speed) ->
-		  {F#{Key=>true}, U#{ speed => Speed }};
-	      (Key=delta, Delta = ?COORD(_Long,_Lat), {F,U}) when
-		    is_float(_Lat), is_float(_Long) ->
-		  {F#{Key=>true}, U#{ delta => Delta }};
-	      (Key=destination, Destination=?COORD(_Long,_Lat), {F,U}) when
-		    is_float(_Lat), is_float(_Long) ->
-		  {F#{Key=>true},U#{ destination => Destination }};
-	      (Key=habitat, Habitat={?COORD(_Long1,_Lat1),
-				     ?COORD(_Long2,_Lat2),R},{F,U}) when
-		    is_float(_Lat1), is_float(_Long1),
-		    is_float(_Lat2), is_float(_Long2),
-		    is_float(R) ->
-		  {F#{Key=>true},U#{ habitat => Habitat }};
-	      (_, _, Acc) ->
-		  %% FIXME: error!
-		  Acc
-	  end, {Features,Info}, Updates),
-    Info1#{ features => Features1 }.
+    maps:fold(
+      fun
+	  (Key, undefined, U) ->
+	      maps:remove(Key, U);
+	  (ping_interval,_, U) -> %% ignored here
+	      U;
+	  (nodeid, NodeID, U) when is_binary(NodeID) ->
+	      U#{ nodeid => NodeID };
+	  (size, Size, U) when is_atom(Size) ->
+	      U#{ size => Size };
+	  (type, Type, U) when is_atom(Type) ->
+	      U#{ type => Type };
+	  (cache_timeout, Timeout, U) when
+		is_integer(Timeout), Timeout > 0 ->
+	      U#{ cache_timeout => Timeout };
+	  (location, Location=?COORD(_Long,_Lat), U) when 
+		is_float(_Lat), is_float(_Long) ->
+	      U#{ location => Location };
+	  (peed, Speed, U) when is_float(Speed) ->
+	      U#{ speed => Speed };
+	  (delta, ?COORD(_Long,_Lat), U) when
+		is_number(_Lat), is_number(_Long) ->
+	      U#{ delta => {_Lat,_Long}};
+	  (destination, ?COORD(_Long,_Lat), U) when
+		is_number(_Lat), is_number(_Long) ->
+	      U#{ destination =>{_Lat,_Long}};
+	  (habitat, {?COORD(_Long1,_Lat1),
+		     ?COORD(_Long2,_Lat2),_R},U) when
+		is_number(_Long1), is_number(_Lat1),
+		is_number(_Long2), is_number(_Lat2),
+		is_number(_R) ->
+	      U#{ habitat => {{_Long1,_Lat1},{_Long2,_Lat2},_R}};
+	  (Key, Value, U) ->
+	      U#{ Key => Value }
+      end, Info, Updates).
+
+
+encode_packet(#conf{ magic=Magic, ping_interval=IVal, info = Info}) ->
+    Data = encode(Info),
+    Size = byte_size(Data),
+    <<Magic:16/binary, IVal:32, Size:32, Data/binary>>.
+
+encode(X) ->
+    Data = encode_(X),
+    list_to_binary(Data).
+
+%% encode "json" data in telldus format
+encode_(X) when is_integer(X) -> 
+    [$i,integer_to_binary(X,16),$s];
+encode_(X) when is_float(X) ->
+    [$f,io_lib_format:fwrite_g(X),$s];
+encode_(X) when is_atom(X) ->
+    Y = atom_to_binary(X),
+    Sz = byte_size(Y),
+    [integer_to_binary(Sz,16),$/,Y];
+encode_(X) when is_list(X) -> %% string()!
+    Sz = length(X),
+    [integer_to_binary(Sz,16),$:,X];
+encode_(X) when is_binary(X) -> %% extension!
+    Sz = byte_size(X),
+    [integer_to_binary(Sz,16),$;,X];
+encode_(Xs) when is_tuple(Xs) ->
+    [$l, [encode_(X) || X <- tuple_to_list(Xs)],$s];
+encode_(Xs) when is_map(Xs) ->
+    [$h, [[encode_(K),encode_(V)] || {K,V} <- maps:to_list(Xs)],$s].
 
 %% current header size = 108 bytes
-get_header(#conf{ magic=Magic },
-	   <<Magic:16/binary, Features:32, IVal:32, Data/binary>>) ->
-    {IVal, decode_header(Features, Data)};
-get_header(_Conf, _Data) -> %% Bad magic or short data
+decode_packet(#conf{ magic=Magic },
+	      <<Magic:16/binary, IVal:32,
+		Size:32, Data:Size/binary, _/binary>>) ->
+    {IVal, decode(Data)};
+decode_packet(_Conf, _Data) -> %% Bad magic or short data
     false.
 
-decode_header(Features, Data) ->
-    decode_header(Features, Data, #{}).
-
-decode_header(Features, Data, Opts) ->
-    %% the order of the flags are important they are in bit order!
-    Opts1 = decode_header_(?FEATURE_LIST, Features, Data, #{}, Opts),
-    Opts2 = case Features band ?NODIS_FEATURE_SIZE_MASK of
-		?NODIS_FEATURE_TINY -> Opts1#{ size => tiny };
-		?NODIS_FEATURE_SMALL -> Opts1#{ size => small};
-		?NODIS_FEATURE_MEDIUM -> Opts1#{ size => medium };
-		?NODIS_FEATURE_HUGE   -> Opts1#{ size => huge };
-		_ -> Opts1
-	    end,
-    Opts3 = case Features band ?NODIS_FEATURE_TYPE_MASK of
-		?NODIS_FEATURE_GENERIC -> Opts2#{ type => generic};
-		?NODIS_FEATURE_STATIC  -> Opts2#{ type => static};
-		?NODIS_FEATURE_ROUTER  -> Opts2#{ type => router};
-		?NODIS_FEATURE_POSTBOX -> Opts2#{ type => postbox};
-		_ -> Opts2
-	    end,
-    Opts3.
-    
-decode_header_([], _Flags, _Data, FMap, Opts) ->
-    Opts#{ features => FMap };
-decode_header_([_|Fs], Flags, Data, FMap, Opts) when Flags band 1 =:= 0 ->
-    decode_header_(Fs, Flags bsr 1, Data, FMap, Opts);
-decode_header_([F|Fs], Flags, Data, FMap, Opts) ->
-    case F of
-	location -> 
-	    <<?BCOORD(Long,Lat),Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => ?COORD(Long,Lat)});
-	speed ->
-	    <<Speed:32/float, Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => Speed });
-	delta -> 
-	    <<?BCOORD(Long,Lat), Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => ?COORD(Long,Lat) });
-	destination -> 
-	    <<?BCOORD(Long,Lat), Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => ?COORD(Long,Lat)});
-
-	habitat ->
-	    <<?BCOORD(Long1,Lat1),?BCOORD(Long2,Lat2),Radius:32/float,
-	      Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => {?COORD(Long1,Lat1),
-					?COORD(Long2,Lat2),Radius}});
-	nodeid ->
-	    <<NodeID:32/binary, Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => NodeID });
-	cache_tmo ->
-	    <<CacheTmo:32, Data1/binary>> = Data,
-	    decode_header_(Fs, Flags bsr 1, Data1, FMap#{ F => true },
-			   Opts#{ F => CacheTmo })
-    end.
-    
-make_header(#conf{ magic=Magic, ping_interval=IVal, info = Info}) ->
-    FMap = maps:get(features, Info, #{}),
-    {Features,Data} = encode_header(?FEATURE_LIST, FMap, Info, 0, []),
-    <<Magic:16/binary, Features:32, IVal:32, Data/binary>>.
-
-encode_header([], _FMap, _Info, Features, Acc) ->
-    {Features, list_to_binary(lists:reverse(Acc))};
-encode_header([F|Fs], FMap, Info, Features, Acc) ->
-    case maps:get(F, FMap, false) of
-	true ->
-	    case F of
-		type ->
-		    Bits = case maps:get(type,Info) of
-			       generic -> ?NODIS_FEATURE_GENERIC;
-			       static  -> ?NODIS_FEATURE_STATIC;
-			       router  -> ?NODIS_FEATURE_ROUTER;
-			       postbox -> ?NODIS_FEATURE_POSTBOX;
-			       _ -> 0
-			   end,
-		    Features1 = (Features band (bnot ?NODIS_FEATURE_SIZE_MASK)) 
-			bor Bits,
-		    encode_header(Fs, FMap, Info, Features1, Acc);
-		size ->
-		    Bits = case maps:get(size,Info) of
-			       tiny -> ?NODIS_FEATURE_TINY;
-			       small -> ?NODIS_FEATURE_SMALL;
-			       medium -> ?NODIS_FEATURE_MEDIUM;
-			       large -> ?NODIS_FEATURE_LARGE;
-			       huge -> ?NODIS_FEATURE_HUGE;
-			       _ -> 0
-			   end,
-		    Features1 = (Features band (bnot ?NODIS_FEATURE_TYPE_MASK)) 
-			bor Bits,
-		    encode_header(Fs, FMap, Info, Features1, Acc);
-		location -> 
-		    ?COORD(Long,Lat) = maps:get(location, Info),
-		    encode_header(Fs, FMap, Info,
-				  Features bor ?NODIS_FEATURE_LOCATION,
-				  [<<?BCOORD(Long,Lat)>> | Acc]);
-		delta -> 
-		    ?COORD(DLong,DLat) = maps:get(delta, Info),
-		    encode_header(Fs, FMap, Info, 
-				  Features bor ?NODIS_FEATURE_DELTA,
-				  [<<?BCOORD(DLong,DLat)>> | Acc]);
-		destination -> 
-		    ?COORD(Long,Lat) = maps:get(destination, Info),
-		    encode_header(Fs, FMap, Info, 
-				  Features bor ?NODIS_FEATURE_DESTINATION,
-				  [<<?BCOORD(Long,Lat)>> | Acc]);
-		speed -> 
-		    Speed = maps:get(speed, Info),
-		    encode_header(Fs, FMap, Info, 
-				  Features bor ?NODIS_FEATURE_SPEED,
-				  [<<Speed:32/float>> | Acc]);
-		nodeid ->
-		    NodeID = zero_pad(maps:get(nodeid, Info), 32),
-		    encode_header(Fs, FMap, Info,
-				  Features bor ?NODIS_FEATURE_NODEID,
-				  [<<NodeID:32/binary>> | Acc]);
-		habitat ->
-		    {?COORD(Long1,Lat1),?COORD(Long2,Lat2),Radius} =
-			maps:get(habitat, Info),
-		    encode_header(Fs, FMap, Info,
-				  Features bor ?NODIS_FEATURE_HABITAT,
-				  [<<?BCOORD(Long1,Lat1),?BCOORD(Long2,Lat2),
-				     Radius:32/float>> | Acc]);
-		cache_timeout ->
-		    CacheTimeout = maps:get(cache_timeout, Info),
-		    encode_header(Fs, FMap, Info,
-				  Features bor ?NODIS_FEATURE_CACHE_TIMEOUT,
-				  [<<CacheTimeout:32>> | Acc])
-	    end;
-	false ->
-	    encode_header(Fs, FMap, Info, Features, Acc)
+decode(Cs) ->
+    case decode_(Cs) of
+	{X,<<>>} -> X
     end.
 
+%% decode (telldus?) encode json structure
+decode_(<<$i,Bin/binary>>) -> decode_int(Bin);
+decode_(<<$f,Bin/binary>>) -> decode_float(Bin);
+decode_(<<$l,Bin/binary>>) -> decode_array(Bin,[]);
+decode_(<<$h,Bin/binary>>) -> decode_struct(Bin,[]);
+decode_(Bin) -> 
+    {Sz, Bin1} = decode_hex(Bin),
+    case Bin1 of
+	<<$:,Bin2:Sz/binary,Bin3/binary>> ->
+	    {binary_to_list(Bin2), Bin3};
+	<<$/,Bin2:Sz/binary,Bin3/binary>> ->
+	    {binary_to_atom(Bin2), Bin3};
+	<<$;,Bin2:Sz/binary,Bin3/binary>> ->
+	    {Bin2, Bin3}
+    end.
+
+decode_int(Bin) ->
+    {I, <<$s,Bin1/binary>>} = decode_hex(Bin),
+    {I, Bin1}.    
+
+decode_float(Bin) ->
+    {F, <<$s,Bin1/binary>>} = string:to_float(Bin),
+    {F, Bin1}.
+
+
+decode_hex(<<$-,Bin/binary>>) ->
+    {Value,Bin1} = decode_hex_(Bin, 0),
+    {-Value,Bin1};
+decode_hex(Bin) ->
+    decode_hex_(Bin, 0).
+
+decode_hex_(Bin0=(<<X,Bin/binary>>), Value) ->
+    if X >= $0, X =< $9 ->
+	    decode_hex_(Bin, Value*16+(X-$0));
+       X >= $a, X =< $f ->
+	    decode_hex_(Bin, Value*16+((X-$a)+10));
+       X >= $A, X =< $F ->
+	    decode_hex_(Bin, Value*16+((X-$A)+10));
+       true ->
+	    {Value, Bin0}
+    end.
+
+
+decode_array(<<$s,Bin/binary>>,Acc) ->
+    {list_to_tuple(lists:reverse(Acc)), Bin};
+decode_array(Bin, Acc) ->
+    {E, Bin1} = decode_(Bin),
+    decode_array(Bin1, [E|Acc]).
+
+decode_struct(<<$s,Bin/binary>>,Acc) ->
+    {maps:from_list(Acc), Bin};
+decode_struct(Bin, Acc) ->
+    {K, Bin1} = decode_(Bin),
+    {V, Bin2} = decode_(Bin1),
+    decode_struct(Bin2, [{K,V}|Acc]).
 
 tick() ->
     erlang:monotonic_time().
 
 make_node(Addr, IVal, NodeInfo, Time) ->
-    ?dbg("make_node: ~s ~s\n", [State, format_addr(Addr)]),
+    ?dbg("make_node: ~s\n", [format_addr(Addr)]),
     #node { addr=Addr, info=NodeInfo, ival=IVal, first_seen = Time, 
 	    last_seen = Time, up_tick = Time }.
 

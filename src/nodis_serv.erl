@@ -35,6 +35,7 @@
 -export([send/1, send/2]).
 -export([encode/1, decode/1]).
 -export([make_addr_map/0]).
+-export([change/2]).
 %% simulation
 -export([simping/4]).
 
@@ -770,7 +771,9 @@ handle_call({get_info,Addr,Options}, _From, S) ->
 	N when is_list(Options) ->
 	    Info = N#node.info,
 	    {reply, [ {Option,maps:get(Option,Info,undefined)}
-		      || Option <- Options ], S}
+		      || Option <- Options ], S};
+	_ ->
+	    {reply, {error,badarg}, S}
     end;
 handle_call({get_node_info,Options}, _From, S) ->
     Info = (S#s.conf)#conf.info,
@@ -778,7 +781,9 @@ handle_call({get_node_info,Options}, _From, S) ->
 	    {reply, maps:get(Options,Info,undefined), S};
        is_list(Options) ->
 	    {reply, [{Option,maps:get(Option,Info,undefined)} ||
-			Option <- Options ], S}
+			Option <- Options ], S};
+       true ->
+	    {reply, {error,badarg}, S}	    
     end;
 handle_call({set_node_info, Updates}, _From, S) ->
     Conf = S#s.conf,
@@ -798,7 +803,9 @@ handle_call({get_node_config, Keys}, _From, S) ->
 	is_atom(Keys) ->
 	    {reply, get_conf(Keys,S#s.conf), S};
 	is_list(Keys) ->
-	    {reply, [ {Key,get_conf(Key,S#s.conf)} || Key <- Keys ], S}
+	    {reply, [ {Key,get_conf(Key,S#s.conf)} || Key <- Keys ], S};
+	true ->
+	    {reply, {error,badarg}, S}
     end;
 handle_call({read_node_counter, Counter}, _From, S) ->
     Value = read_counter(Counter, S, 0),
@@ -1022,27 +1029,40 @@ handle_ping(Addr,IVal,Info,S) ->
     case read_node(Addr, S) of
 	false ->
 	    N = make_node(Addr, IVal, Info, Now),
-	    {noreply,wakeup_node(N, S)};
+	    S1 = wakeup_node(N, S),
+	    notify_change(S1, Addr, Info, #{}),
+	    {noreply,S1};
 	N0 ->
 	    N = N0#node { last_seen = Now, info = Info, ival = IVal },
 	    case N#node.state of
 		down ->
 		    DTime = time_diff_ms(Now,N#node.down_tick),
 		    if DTime > (S#s.conf)#conf.min_down_time ->
-			    {noreply,wakeup_node(N, S)};
+			    S1 = wakeup_node(N, S),
+			    %% since node was down, notify with new info!
+			    notify_change(S1, Addr, Info, #{}),
+			    {noreply,S1};
 		       true ->
-			    {noreply,insert_node(N, S)}
+			    S1 = insert_node(N, S),
+			    notify_change(S1, Addr, Info, N0#node.info),
+			    {noreply,S1}
 		    end;
 		wait ->
 		    UTime = time_diff_ms(Now,N#node.up_tick),
 		    MinWaitTime = (S#s.conf)#conf.min_wait_time + N#node.dt_ms,
 		    if UTime > MinWaitTime ->
-			    {noreply,wakeup_node(N, S)};
+			    S1 = wakeup_node(N, S),
+			    notify_change(S1, Addr, Info, N0#node.info),
+			    {noreply,S1};
 		       true ->
-			    {noreply,insert_node(N, S)}
+			    S1 = insert_node(N, S),
+			    notify_change(S1, Addr, Info, N0#node.info),
+			    {noreply,S1}
 		    end;
 		up ->
-		    {noreply,insert_node(N, S)}
+		    S1 = insert_node(N, S),
+		    notify_change(S1, Addr, Info, N0#node.info),
+		    {noreply,S1}
 	    end
     end.
 
@@ -1163,6 +1183,32 @@ gc_nodes(S) ->
 	      end,
 	      set_node(down, N#node{down_tick=Now}, Si)
       end, S, Down).
+
+notify_change(S, Addr, New, Old) ->
+    case change(New, Old) of
+	[] -> ok;
+	ChangeList ->
+	    notify_subs(S, {change, Addr, ChangeList})
+    end.
+
+change(New, Old) ->
+    I = maps:iterator(New),
+    change_(I, Old, []).
+
+change_(I, Old, Acc) ->
+    case maps:next(I) of
+	none ->
+	    [{K,undefined,V} || {K,V} <- maps:to_list(Old)] ++ Acc;
+	{Key,Vnew,I1} ->
+	    case maps:take(Key, Old) of
+		error ->
+		    change_(I1, Old, [{Key,Vnew,undefined}|Acc]);
+		{Vnew, Old1} ->
+		    change_(I1, Old1, Acc);
+		{Vold, Old1} ->
+		    change_(I1, Old1, [{Key,Vnew,Vold}|Acc])
+	    end
+    end.
 
 notify_subs(S, Message) ->
     %% io:format("notify: ~w\n", [Message]),

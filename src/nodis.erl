@@ -20,7 +20,7 @@
 -export([set_node_habitat/1, set_node_habitat/2]).
 -export([set_node_info/1, set_node_info/2]).
 -export([unset_node_info/1, unset_node_info/2]).
-
+-export([get_node_info/1, get_node_info/2]).
 -export([get_node_config/1, get_node_config/2]).
 -export([set_node_config/1, set_node_config/2]).
 
@@ -106,6 +106,11 @@ set_node_info(Info) ->
     nodis_serv:set_node_info(Info).
 set_node_info(Pid,Info) ->
     nodis_serv:set_node_info(Pid, Info).
+
+get_node_info(Info) ->
+    nodis_serv:get_node_info(Info).
+get_node_info(Pid,Info) ->
+    nodis_serv:get_node_info(Pid, Info).
 
 unset_node_info(Info) ->
     nodis_serv:unset_node_info(Info).

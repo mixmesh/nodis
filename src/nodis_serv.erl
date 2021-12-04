@@ -1348,7 +1348,7 @@ format_addr(NAddr) ->
     case NAddr of
 	{Addr,Port} when tuple_size(Addr) =:= 4 -> 
 	    inet:ntoa(Addr) ++ ":" ++ integer_to_list(Port);
-	{Addr,Port} when tuple_size(Addr) =:= 6 -> 
+	{Addr,Port} when tuple_size(Addr) =:= 8 -> 
 	    "["++inet:ntoa(Addr) ++ "]:" ++ 
 		integer_to_list(Port)
     end.

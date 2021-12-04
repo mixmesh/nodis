@@ -1044,7 +1044,7 @@ handle_ping(Addr,IVal,Info,S) ->
 			    {noreply,S1};
 		       true ->
 			    S1 = insert_node(N, S),
-			    notify_change(S1, Addr, Info, N0#node.info),
+			    %%notify_change(S1, Addr, Info, N0#node.info),
 			    {noreply,S1}
 		    end;
 		wait ->
@@ -1056,7 +1056,7 @@ handle_ping(Addr,IVal,Info,S) ->
 			    {noreply,S1};
 		       true ->
 			    S1 = insert_node(N, S),
-			    notify_change(S1, Addr, Info, N0#node.info),
+			    %% notify_change(S1, Addr, Info, N0#node.info),
 			    {noreply,S1}
 		    end;
 		up ->

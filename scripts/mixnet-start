@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+#  Setup laptop/raspi for temporary mixmesh networking 
+#  (ipv6/ipv4)
+#
+#    usage: mixnet-start wlan0
+#
+INTERFACE=$1
+SSID="MIXMESH"
+PASSWORD=off
+CHANNEL=1
+
+# 1. Ubuntu, we must stop nmcli
+sudo nmcli networking off
+
+# 2. get mac address and generate a unique IPV6 "site" address
+MACADDR=`ip link show $INTERFACE | grep ether | awk '{ print $2 }'`
+IFADDR=`ipv6calc --action prefixmac2ipv6 --in prefix+mac --out ipv6addr fec0:: $MACADDR`
+
+# 3. setup interface
+
+sudo ifconfig $INTERFACE down
+sudo iwconfig $INTERFACE mode ad-hoc
+sudo iwconfig $INTERFACE essid $SSID
+sudo iwconfig $INTERFACE channel $CHANNEL
+sudo iwconfig $INTERFACE key $PASSWORD 
+sudo ifconfig $INTERFACE add $IFADDR/64
+sudo ifconfig $INTERFACE up
+
+# 4. run nodis with default routing support
+erl -nodis device \'"$INTERFACE"\' family inet6 -s nodis

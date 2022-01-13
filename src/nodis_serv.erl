@@ -1503,7 +1503,7 @@ filter_family(_IP, _) -> false.
 
 %% filter link local addresses we can not use yet,
 %% erlang ipv6 do not support scope_index in bind!
-%% filter_ip({A,_,_,_,_,_,_,_}) -> (A band 16#FE80 =/= 16#FE80);
+filter_ip({A,_,_,_,_,_,_,_}) -> ((A band 16#FE80) =/= 16#FE80);
 filter_ip(_) -> true.
 
 send_ping(S) ->

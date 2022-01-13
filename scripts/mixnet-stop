@@ -1,0 +1,8 @@
+#!/bin/sh
+#
+#  Tear down mixmesh networking and restore normal networking
+#
+INTERFACE=$1
+sudo ifconfig $INTERFACE down
+sudo nmcli networking on
+sudo ifup $INTERFACE

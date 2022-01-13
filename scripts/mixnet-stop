@@ -3,6 +3,15 @@
 #  Tear down mixmesh networking and restore normal networking
 #
 INTERFACE=$1
+NMCLI=`which nmcli`
+HOSTNAME=`hostname`
+NODENAME=nodis@HOSTNAME
+
 sudo ifconfig $INTERFACE down
-sudo nmcli networking on
+if [ -n "$NMCLI" ]; then
+   sudo $NMCLI networking on
+fi
 sudo ifup $INTERFACE
+sudo ifconfig $INTERFACE up
+
+erl -sname client_$$ -noinput -hidden -eval "case rpc:call($NODENAME, init, stop, []) of ok -> erlang:display(ok), erlang:halt(0); {badrpc,R} -> erlang:display(R), erlang:halt(1) end." 

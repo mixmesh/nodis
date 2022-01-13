@@ -9,9 +9,14 @@ INTERFACE=$1
 SSID="MIXMESH"
 PASSWORD=off
 CHANNEL=1
+NMCLI=`which nmcli`
 
 # 1. Ubuntu, we must stop nmcli
-sudo nmcli networking off
+if [ -n "$NMCLI" ]; then
+   sudo $NMCLI networking off
+fi
+
+sleep 3
 
 # 2. get mac address and generate a unique IPV6 "site" address
 MACADDR=`ip link show $INTERFACE | grep ether | awk '{ print $2 }'`
@@ -28,4 +33,4 @@ sudo ifconfig $INTERFACE add $IFADDR/64
 sudo ifconfig $INTERFACE up
 
 # 4. run nodis with default routing support
-erl -nodis device \'"$INTERFACE"\' family inet6 -s nodis
+erl -sname nodis -nodis device "\"$INTERFACE\"" family inet6 -s nodis

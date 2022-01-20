@@ -3,5 +3,4 @@
 #
 INTERFACE=$1
 MACADDR=`ip link show $INTERFACE | grep ether | awk '{ print $2 }'`
-ipv6calc --action prefixmac2ipv6 --in prefix+mac --out ipv6addr fec0:: $MACADDR
-
+ipv6calc --action prefixmac2ipv6 --in prefix+mac --out ipv6addr fd00:: $MACADDR

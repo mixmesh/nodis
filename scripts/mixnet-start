@@ -18,9 +18,17 @@ fi
 
 sleep 3
 
-# 2. get mac address and generate a unique IPV6 "site" address
+# interface mac address
 MACADDR=`ip link show $INTERFACE | grep ether | awk '{ print $2 }'`
-IFADDR=`ipv6calc --action prefixmac2ipv6 --in prefix+mac --out ipv6addr fc00:: $MACADDR`
+# 40 random bits
+
+GKEY=`date -u +"%s%N"`
+EUI64=`ipv6calc --action geneui64 --in mac --out hex $MACADDR`
+SHA=`echo $GKEY$EUI64 | sha1sum`
+
+# 2. get mac address and generate a unique IPV6 "site" address
+
+IFADDR=`ipv6calc --action prefixmac2ipv6 --in prefix+mac --out ipv6addr fd00:: $MACADDR`
 
 # 3. setup interface
 

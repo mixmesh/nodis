@@ -1590,6 +1590,11 @@ update_info(Info, Updates) ->
 	      U#{ Key => Value }
       end, Info, Updates).
 
+%% FIXME: segment when > MTU size
+%% this can be done by encoding I (sequence) and N total number of segments
+%%
+%% <<Magic:16/binary,I:8,N:8,CRC32:32,SIG:16|20/binary, Data...>> 
+%%
 
 encode_packet(#conf{ magic=Magic, ping_interval=IVal, info = Info}) ->
     Data = encode(Info),
@@ -1599,26 +1604,55 @@ encode_packet(#conf{ magic=Magic, ping_interval=IVal, info = Info}) ->
 encode(X) ->
     Data = encode_(X),
     list_to_binary(Data).
-
-%% encode "json" data in telldus format
-encode_(X) when is_integer(X) -> 
-    [$i,integer_to_binary(X,16),$s];
+%%
+%% Compact format:
+%%  <elem>
+%%     <xint> 'i'|'j'                         (integer)
+%%     <int> '.' <int> ['e' <int>] 'f'|'g'    (float)
+%%     <xint> ':' <char>                      (string)
+%%     <xint> ';' <char>*                     (atom)
+%%     <xint> '<' <char>*                     (binary)
+%%     <xint> '[' <elem>*                     (list)
+%%     <xint> '{' <elem>*                     (tuple)
+%%     <xint> '#' (<elem><elem>)*             (map)
+%%  <xint> = ('0'..'9''A'...'F')+
+%%
+encode_(X) when is_integer(X) ->
+    if X >= 0 ->
+	    [integer_to_binary(X, 16),$i];
+       true ->
+	    [integer_to_binary(-X, 16),$j]
+    end;
 encode_(X) when is_float(X) ->
-    [$f,io_lib_format:fwrite_g(X),$s];
+    if X >= 0 -> %% note integer part is decimal (fixme?)
+	    [io_lib_format:fwrite_g(X),$f];
+       true ->
+	    [io_lib_format:fwrite_g(-X),$g]
+    end;
 encode_(X) when is_atom(X) ->
     Y = atom_to_binary(X),
     Sz = byte_size(Y),
-    [integer_to_binary(Sz,16),$/,Y];
-encode_(X) when is_list(X) -> %% string()!
-    Sz = length(X),
-    [integer_to_binary(Sz,16),$:,X];
-encode_(X) when is_binary(X) -> %% extension!
+    [integer_to_binary(Sz,16),$;,Y];
+encode_(X) when is_binary(X) ->
     Sz = byte_size(X),
-    [integer_to_binary(Sz,16),$;,X];
-encode_(Xs) when is_tuple(Xs) ->
-    [$l, [encode_(X) || X <- tuple_to_list(Xs)],$s];
-encode_(Xs) when is_map(Xs) ->
-    [$h, [[encode_(K),encode_(V)] || {K,V} <- maps:to_list(Xs)],$s].
+    [integer_to_binary(Sz,16),$<,X];
+encode_(X) when is_list(X) ->
+    try iolist_size(X) of
+	Sz ->
+	    [integer_to_binary(Sz,16),$:,X]
+    catch
+	error:badarg ->
+	    Sz = length(X),
+	    [integer_to_binary(Sz,16),$[,[encode_(E) || E <- X ]]
+    end;
+encode_(X) when is_tuple(X) ->
+    Sz = tuple_size(X),
+    [integer_to_binary(Sz,16),${,[encode_(E) || E <- tuple_to_list(X) ]];
+encode_(X) when is_map(X) ->
+    Sz = map_size(X),
+    [integer_to_binary(Sz,16),$#,
+     [[encode_(K),encode_(V)] || {K,V} <- maps:to_list(X)]].
+
 
 %% current header size = 108 bytes
 decode_packet(#conf{ magic=Magic },
@@ -1628,66 +1662,67 @@ decode_packet(#conf{ magic=Magic },
 decode_packet(_Conf, _Data) -> %% Bad magic or short data
     false.
 
-decode(Cs) ->
-    case decode_(Cs) of
+decode(Bin) ->
+    case decode_(Bin) of
 	{X,<<>>} -> X
     end.
 
-%% decode (telldus?) encode json structure
-decode_(<<$i,Bin/binary>>) -> decode_int(Bin);
-decode_(<<$f,Bin/binary>>) -> decode_float(Bin);
-decode_(<<$l,Bin/binary>>) -> decode_array(Bin,[]);
-decode_(<<$h,Bin/binary>>) -> decode_struct(Bin,[]);
-decode_(Bin) -> 
-    {Sz, Bin1} = decode_hex(Bin),
-    case Bin1 of
-	<<$:,Bin2:Sz/binary,Bin3/binary>> ->
-	    {binary_to_list(Bin2), Bin3};
-	<<$/,Bin2:Sz/binary,Bin3/binary>> ->
-	    {binary_to_atom(Bin2), Bin3};
-	<<$;,Bin2:Sz/binary,Bin3/binary>> ->
-	    {Bin2, Bin3}
+decode_(Bin) -> decode_(Bin, 0, []).
+
+decode_(<<X,Bin/binary>>,L,Acc) when X >= $0, X =< $9 ->
+    decode_(Bin, (L bsl 4)+(X-$0),[X|Acc]);
+decode_(<<X,Bin/binary>>,L,Acc) when X >= $A, X =< $F ->
+    decode_(Bin, (L bsl 4)+(X-$A)+10,[X|Acc]);
+decode_(<<C,Bin/binary>>,L,Acc) ->
+    case C of
+	$i -> {L, Bin};
+	$j -> {-L, Bin};
+	$. -> decode_float(Bin, [$.|Acc]);
+	$: ->
+	    <<Bin1:L/binary, Bin2/binary>> = Bin,
+	    {binary_to_list(Bin1), Bin2};
+	$< ->
+	    <<Bin1:L/binary, Bin2/binary>> = Bin,
+	    {Bin1, Bin2};
+	$; ->
+	    <<Bin1:L/binary, Bin2/binary>> = Bin,
+	    {binary_to_atom(Bin1), Bin2};
+	$[ ->
+	    decode_seq(L, Bin);
+	${ ->
+	    {Seq,Bin2} = decode_seq(L, Bin),
+	    {list_to_tuple(Seq), Bin2};
+	$# ->
+	    {Seq,Bin2} = decode_seq2(L, Bin),
+	    {maps:from_list(Seq), Bin2}
     end.
 
-decode_int(Bin) ->
-    {I, <<$s,Bin1/binary>>} = decode_hex(Bin),
-    {I, Bin1}.    
+decode_seq(N, Bin) ->
+    decode_seq(N, Bin, []).
 
-decode_float(Bin) ->
-    {F, <<$s,Bin1/binary>>} = string:to_float(Bin),
-    {F, Bin1}.
+decode_seq(0, Bin, Acc) ->
+    {lists:reverse(Acc), Bin};
+decode_seq(I, Bin, Acc) ->
+    {Elem, Bin1} = decode_(Bin),
+    decode_seq(I-1, Bin1, [Elem|Acc]).
 
+decode_seq2(N, Bin) ->
+    decode_seq2(N, Bin, []).
 
-decode_hex(<<$-,Bin/binary>>) ->
-    {Value,Bin1} = decode_hex_(Bin, 0),
-    {-Value,Bin1};
-decode_hex(Bin) ->
-    decode_hex_(Bin, 0).
+decode_seq2(0, Bin, Acc) ->
+    {Acc, Bin};
+decode_seq2(I, Bin, Acc) ->
+    {Elem1, Bin1} = decode_(Bin),
+    {Elem2, Bin2} = decode_(Bin1),
+    decode_seq2(I-1, Bin2, [{Elem1,Elem2}|Acc]).
 
-decode_hex_(Bin0=(<<X,Bin/binary>>), Value) ->
-    if X >= $0, X =< $9 ->
-	    decode_hex_(Bin, Value*16+(X-$0));
-       X >= $a, X =< $f ->
-	    decode_hex_(Bin, Value*16+((X-$a)+10));
-       X >= $A, X =< $F ->
-	    decode_hex_(Bin, Value*16+((X-$A)+10));
-       true ->
-	    {Value, Bin0}
-    end.
+decode_float(<<$f,Bin/binary>>, Acc) ->
+    {list_to_float(lists:reverse(Acc)), Bin};
+decode_float(<<$g,Bin/binary>>, Acc) ->
+    {-list_to_float(lists:reverse(Acc)), Bin};
+decode_float(<<X,Bin/binary>>, Acc) ->
+    decode_float(Bin, [X|Acc]).
 
-
-decode_array(<<$s,Bin/binary>>,Acc) ->
-    {list_to_tuple(lists:reverse(Acc)), Bin};
-decode_array(Bin, Acc) ->
-    {E, Bin1} = decode_(Bin),
-    decode_array(Bin1, [E|Acc]).
-
-decode_struct(<<$s,Bin/binary>>,Acc) ->
-    {maps:from_list(Acc), Bin};
-decode_struct(Bin, Acc) ->
-    {K, Bin1} = decode_(Bin),
-    {V, Bin2} = decode_(Bin1),
-    decode_struct(Bin2, [{K,V}|Acc]).
 
 tick() ->
     erlang:monotonic_time().

@@ -105,6 +105,7 @@
 	    type => generic|static|router|postbox,
 
 	    %% OPTIONAL 
+	    internet => boolean(),   %% internet access (type=router)
 
 	    %% temporary node id (valid cache_timeout seconds)
 	    nodeid => <<_:(32*8)>>,
@@ -569,7 +570,13 @@ init([InputOpts]) ->
 		end,
     NodeID = crypto:strong_rand_bytes(32),
     %% NodeID = crypto:hash(sha256, ipv6-address + time)
-    NodeInfo = #{ nodeid => NodeID },
+
+    NodeInfo0 = case maps:get(info, Opts, #{}) of
+	Info when is_map(Info) -> Info;
+	Info when is_list(Info) ->
+	    maps:from_list([{K,V} || {K,V} <- Info])
+    end,
+    NodeInfo = NodeInfo0#{ nodeid => NodeID },
     Conf0 = #conf {
 	       input  = InputOpts,  %% keep override options
 	       simulation = Simulation orelse Simulator,

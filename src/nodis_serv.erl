@@ -599,6 +599,7 @@ init([InputOpts]) ->
 		   }};
 	false ->
 	    AddrMap = make_addr_map(),
+	    %% io:format("Laddr0 = ~p\n", [Laddr0]),
 	    Laddr = if is_tuple(Laddr0) ->
 			    Laddr0;
 		       Laddr0 =:= any; Laddr0 =:= undefined ->
@@ -1389,7 +1390,7 @@ multicast_if(inet6, Laddr, AddrMap) ->
 	    end,
 	    [{raw,?IPPROTO_IPV6,?IPV6_MULTICAST_IF,<<IfIndex:32/native>>}];
 	[] ->
-	    ?warn("error ifindex: ~s : ~p\n", [inet:ntoa(Laddr), enoent]),
+	    ?warn("error ifindex: ~p : ~p\n", [inet:ntoa(Laddr), enoent]),
 	    []
     end.
 
@@ -1448,7 +1449,7 @@ lookup_ip(Name,Family,AddrMap) ->
 	    IndexList = ifindex(Name,AddrMap),
 	    lists:append([filter_family_list(maps:get(I,AddrMap),Family) ||
 			     I <- IndexList ]);
-	IP ->
+	{ok,IP} ->
 	    [IP]
     end.
 

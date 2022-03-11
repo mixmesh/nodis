@@ -623,7 +623,7 @@ init([InputOpts]) ->
 			    ?warn("No such interface ~p",[Laddr0]),
 			    select_any(Family)
 		    end,
-	    SendOpts = [Family,{active,false}] ++
+	    SendOpts = [Family,{active,false},{ifaddr,Laddr}] ++
 		multicast_if(Family,Laddr,AddrMap) ++
 		multicast_ttl(Family,Mhops) ++
 		multicast_loop(Family,Mloop),

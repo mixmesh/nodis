@@ -97,7 +97,7 @@ recv(Opts) ->
 	    end,
     RAddr = ?MULTICAST_IF,
     RecvOpts = [{reuseaddr,true},{mode,binary},{active,false},
-		{ifaddr,RAddr}] ++reuse_port(),
+		{ifaddr,RAddr}] ++reuse_port() ++ [{recvbuf, 128}],
     MultiOpts = [{add_membership,{MAddr,LAddr}},{active,true}],
     case catch gen_udp:open(MPort,RecvOpts++MultiOpts) of
 	{ok,Socket} ->    

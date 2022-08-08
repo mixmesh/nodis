@@ -7,7 +7,9 @@
 
 -module(mspeed).
 
--compile(export_all).
+%%-compile(export_all).
+-export([send/0, send/1]).
+-export([recv/0, recv/1]).
 
 -define(debug(_Format), ?debug(_Format, [])).
 -define(debug(_Format, _Args), io:format((_Format),(_Args))).

@@ -22,7 +22,7 @@ start_link(Args) ->
     case supervisor:start_link({local, ?MODULE}, ?MODULE, Args) of
 	{ok, Pid} ->
 	    {ok, Pid, {normal, Args}};
-	Error -> 
+	Error ->
 	    Error
     end.
 
@@ -41,4 +41,7 @@ stop() ->
 init(Args) ->
     Nodis = {nodis_serv_0, {nodis_serv, start_link_local, [Args]},
 	     permanent, 5000, worker, [nodis_serv_0]},
-    {ok,{{one_for_all,3,5}, [Nodis]}}.
+    NodisListenerServ =
+        #{id => nodis_listener_serv,
+          start => {nodis_listener_serv, start_link, []}},
+    {ok,{{one_for_all,3,5}, [Nodis, NodisListenerServ]}}.

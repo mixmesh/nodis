@@ -195,12 +195,10 @@
 	   string() => [ifindex_t()],
 	   ifindex_t() => [inet:ip_address()] }.
 
--define(NODIS_DEFAULT_PING_DELAY, 1000). %% 1s before first ping
--define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).   %% before being regarded as gone
+-define(NODIS_DEFAULT_PING_DELAY, 1000).     %% 1s before first ping
+-define(NODIS_DEFAULT_MAX_PINGS_LOST, 3).    %% before being regarded as gone
 -define(NODIS_DEFAULT_MIN_WAIT_TIME, 30000). %% test 30seconds
--define(NODIS_DEFAULT_MIN_DOWN_TIME, 60000). %% test 30seconds
-%% -define(NODIS_DEFAULT_MIN_WAIT_TIME, (5*60*1000)).  %% 5min
-%% -define(NODIS_DEFAULT_MIN_DOWN_TIME, (10*60*1000)). %% 10min
+-define(NODIS_DEFAULT_MIN_DOWN_TIME, 60000). %% test 60seconds
 -define(NODIS_DEFAULT_MAX_UP_NODES,      10).
 -define(NODIS_DEFAULT_MAX_DOWN_NODES,    2000).
 -define(NODIS_DEFAULT_MAX_WAIT_NODES,    1000).
@@ -1185,11 +1183,11 @@ gc_nodes(S) ->
     lists:foldl(
       fun(N, Si) ->
 	      if N#node.state =/= down ->
-		      notify_subs(Si, {down, N#node.addr});
+		      notify_subs(Si, {down, N#node.addr}),
+		      set_node(down, N#node{down_tick=Now}, Si);
 		 true ->
-		      ok
-	      end,
-	      set_node(down, N#node{down_tick=Now}, Si)
+		      Si
+	      end
       end, S, Down).
 
 notify_change(S, Addr, New, Old) ->
@@ -1287,7 +1285,7 @@ dump_nodes(S=#s{conf=Conf}) ->
 	      LTm = 
 		  if Lt > N#node.ival*Conf#conf.max_pings_lost*1000 ->
 			  down;
-		     Lt > N#node.ival*1000 ->
+		     Lt > N#node.ival*1000+50 ->
 			  missed;
 		     true ->
 			  ok
@@ -1312,7 +1310,7 @@ dump_nodes(S=#s{conf=Conf}) ->
 				     true ->
 					  Conf#conf.min_down_time - Dt_ms
 				  end,
-			      format_node(I,wait,Addr,
+			      format_node(I,down,Addr,
 					  remain,Dt*1000,
 					  Lt,N,LTm,Info)
 		      end;

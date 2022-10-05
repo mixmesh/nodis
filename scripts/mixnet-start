@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -x
 #
 #  Setup laptop/raspi for temporary mixmesh networking 
 #  (ipv6/ipv4)
@@ -31,14 +31,16 @@ SHA=`echo $GKEY$EUI64 | sha1sum`
 IFADDR=`ipv6calc --action prefixmac2ipv6 --in prefix+mac --out ipv6addr fd00:: $MACADDR`
 
 # 3. setup interface
+# FIXME may have to "rfkill unblock <id>"  (check first)
 
 sudo ifconfig $INTERFACE down
 sudo iwconfig $INTERFACE mode ad-hoc
 sudo iwconfig $INTERFACE essid $SSID
 sudo iwconfig $INTERFACE channel $CHANNEL
-sudo iwconfig $INTERFACE key $PASSWORD 
-sudo ifconfig $INTERFACE add $IFADDR/64
+sudo iwconfig $INTERFACE key $PASSWORD
 sudo ifconfig $INTERFACE up
+# allow link local interface to start?
+sudo ifconfig $INTERFACE add $IFADDR/64
 
 # 4. run nodis with default routing support
-#erl -detached -sname nodis -nodis device "\"$INTERFACE\"" family inet6 -s nodis
+#erl -detached -sname nodis -nodis family inet6 ifaddr \"$IFADDR\" -s nodis

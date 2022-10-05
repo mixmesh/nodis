@@ -60,11 +60,19 @@ by the following configurables
 Nodis send a ping keep alive header every ping-interval (ms) with 
 the following information
 
-	   <<Magic:16/binary, Features:32, NodeID:32/binary,
-	     IVal:32, CacheTimeout:32,
-	     Lat:32/float, Long:32/float, Spd:32/float,
-	     DeltaLat:32/float, DeltaLong:32/float,
-	     DestLat:32/float, DestLong:32/float,
-	     HabLat1:32/float,HabLong1:32/float,
-	     HabLat2:32/float,HabLong2:32/float,
-	     HabRadius:32/float>>
+	   <<Magic:16/binary, IVal:32, Size:32, Data/binary>>
+
+The Data is encoded with the node info format
+
+# Node Info format
+
+    <elem>
+     <xint> 'i'|'j'                         (integer)
+     <int> '.' <int> ['e' <int>] 'f'|'g'    (float)
+     <xint> ':' <char>                      (string)
+     <xint> ';' <char>*                     (atom)
+     <xint> '<' <char>*                     (binary)
+     <xint> '[' <elem>*                     (list)
+     <xint> '{' <elem>*                     (tuple)
+     <xint> '#' (<elem><elem>)*             (map)
+     <xint> = ('0'..'9''A'...'F')+

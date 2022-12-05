@@ -1476,22 +1476,38 @@ make_addr_map() ->
 
 make_addr_map_([], _IndexMap, Map) ->
     Map;
-make_addr_map_([{IfName,Flags}|List], IndexMap, M0) ->
-    Index = maps:get(IfName, IndexMap),
-    AddrList = lists:filter(fun filter_ip/1,
-			    proplists:get_all_values(addr, Flags)),
-    M1 =
-	lists:foldl(
-	  fun(IP, Mi) ->
-		  IndexList =
-		      case maps:get(IP, Mi, undefined) of
-			  undefined -> [Index];
-			  Is -> [Index|Is]
-		      end,
-		  Mi#{ IP => IndexList }
-	  end, M0, AddrList),
-    M2 = M1#{ IfName => [Index], Index => AddrList },
-    make_addr_map_(List, IndexMap, M2).
+make_addr_map_([{IfName, Flags}|List], IndexMap, M0) ->
+    Index =
+        case maps:get(IfName, IndexMap) of
+            {badkey, _} ->
+                case string:tokens(IfName, ":") of
+                    %% Debian workaround
+                    [AvahiIfName, "avahi"] ->
+                        maps:get(AvahiIfName, IndexMap);
+                    _ ->
+                        throw(badarg)
+                end;
+            ActualIndex ->
+                ActualIndex
+        end,
+    case lists:filter(fun filter_ip/1,
+                      proplists:get_all_values(addr, Flags)) of
+        [] ->
+            make_addr_map_(List, IndexMap, M0);
+        AddrList ->
+            M1 =
+                lists:foldl(
+                  fun(IP, Mi) ->
+                          IndexList =
+                              case maps:get(IP, Mi, undefined) of
+                                  undefined -> [Index];
+                                  Is -> [Index|Is]
+                              end,
+                          Mi#{ IP => IndexList }
+                  end, M0, AddrList),
+            M2 = M1#{ IfName => [Index], Index => AddrList },
+            make_addr_map_(List, IndexMap, M2)
+    end.
 
 %% generate #{ "interface-name" => interface-index()
 -spec make_index_map() -> #{ Name::string() => ifindex_t() }.

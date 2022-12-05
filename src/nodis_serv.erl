@@ -1478,10 +1478,10 @@ make_addr_map_([], _IndexMap, Map) ->
     Map;
 make_addr_map_([{IfName, Flags}|List], IndexMap, M0) ->
     Index =
-        case maps:get(IfName, IndexMap) of
-            {badkey, _} ->
+        case maps:get(IfName, IndexMap, not_found) of
+            not_found ->
                 case string:tokens(IfName, ":") of
-                    %% Debian workaround
+                    %% Debian workaround for avahi interfaces
                     [AvahiIfName, "avahi"] ->
                         maps:get(AvahiIfName, IndexMap);
                     _ ->
